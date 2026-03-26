@@ -2,12 +2,56 @@ import { Link, Route, Routes } from "react-router-dom";
 import {
   consentCategories,
   consentDisclosure,
-  frontierHighlights,
   privacyDisclosure,
   programDescription,
   sampleMessages,
 } from "../shared/program";
 import { ConsentForm } from "./components/ConsentForm";
+
+const repoUrl = "https://github.com/K12io/roscoe.sh";
+const docsUrl = "https://github.com/K12io/roscoe.sh#readme";
+
+const commandDeck = [
+  "npm install -g roscoe",
+  "roscoe onboard /path/to/project",
+  "roscoe start codex@/path/to/project",
+];
+
+const productSignals = [
+  "Monitors Claude Code and Codex sessions side by side",
+  "Drafts replies with confidence scoring and human override",
+  "Texts you when a Guild lane needs a real decision",
+];
+
+const workflowMoments = [
+  {
+    title: "Watch the wire",
+    body: "Roscoe reads the live CLI transcript, intent brief, and proof expectations before it drafts anything back.",
+  },
+  {
+    title: "Answer with judgment",
+    body: "Guild workers keep moving until Roscoe decides a reply is safe to send, asks you for approval, or texts for a missing decision.",
+  },
+  {
+    title: "Prove done",
+    body: "The loop stays tied to tests, coverage, and transcript evidence so ‘done’ means the code, the proof, and the operator all agree.",
+  },
+];
+
+const developerPillars = [
+  {
+    label: "Open source",
+    detail: "Apache 2.0 licensed so teams can inspect, fork, and adapt the operator loop.",
+  },
+  {
+    label: "CLI-native",
+    detail: "Built around real Claude and Codex CLI sessions rather than a fake chat abstraction.",
+  },
+  {
+    label: "Human-in-the-loop",
+    detail: "Roscoe can auto-run, pause for approval, or escalate to SMS when a lane needs a real answer.",
+  },
+];
 
 function SiteFrame({ children }: { children: React.ReactNode }) {
   return (
@@ -15,6 +59,9 @@ function SiteFrame({ children }: { children: React.ReactNode }) {
       <header className="masthead">
         <Link className="brandmark" to="/">ROSCOE</Link>
         <nav className="topnav">
+          <a href="/#getting-started">Getting started</a>
+          <a href="/#docs">Docs</a>
+          <a href="/#open-source">Open source</a>
           <Link to="/sms-consent">SMS Consent</Link>
           <Link to="/privacy">Privacy</Link>
           <Link to="/terms">Terms</Link>
@@ -31,17 +78,36 @@ function SiteFrame({ children }: { children: React.ReactNode }) {
 
 function HeroScene() {
   return (
-    <div className="hero-art" aria-hidden="true">
-      <div className="hero-haze"></div>
-      <div className="hero-ground"></div>
-      <div className="wagon">
-        <div className="wagon-cover"></div>
-        <div className="wagon-body"></div>
-        <div className="wagon-wheel left"></div>
-        <div className="wagon-wheel right"></div>
+    <div className="hero-plate" aria-hidden="true">
+      <div className="plate-grid"></div>
+      <div className="plate-glow"></div>
+      <div className="signal-lines">
+        <span></span>
+        <span></span>
+        <span></span>
       </div>
-      <div className="telegraph-pole">
-        <div className="telegraph-signal"></div>
+      <div className="terminal-sheet">
+        <div className="sheet-header">
+          <span>ROSCOE</span>
+          <span>LIVE AUTOPILOT</span>
+        </div>
+        <div className="sheet-row">
+          <span className="sheet-label">REMOTE</span>
+          <span className="sheet-value">Codex traced the payment flow and found the failing edge.</span>
+        </div>
+        <div className="sheet-row">
+          <span className="sheet-label">ROSCOE</span>
+          <span className="sheet-value">High confidence. Ship the proof patch, rerun e2e, then send the status wire.</span>
+        </div>
+        <div className="sheet-row">
+          <span className="sheet-label">STATUS</span>
+          <span className="sheet-value">Tests-first · human-ready · confidence 92</span>
+        </div>
+      </div>
+      <div className="telegraph-rings">
+        <span></span>
+        <span></span>
+        <span></span>
       </div>
     </div>
   );
@@ -54,114 +120,154 @@ function HomePage() {
         <section className="hero">
           <div className="hero-inner">
             <div className="hero-copy">
-              <p className="eyebrow">Frontier Dispatch for Modern Builders</p>
-              <h1>Autopilot for Claude & Codex, styled like a wagon-train telegraph office.</h1>
+              <p className="eyebrow">Autonomous CLI Dispatch For Developers</p>
+              <h1>Roscoe runs the reply loop for Claude Code and Codex.</h1>
               <p className="hero-text">
-                Roscoe keeps one eye on the build, one ear on the wire, and one hand on the proof path. Guild workers keep moving west until a human reply or a fresh code is needed.
+                Open-source autopilot for CLI-native development. Roscoe watches the transcript, keeps Guild workers aligned to the brief, drafts the next answer, and escalates to a human only when the work truly needs judgment.
               </p>
               <div className="hero-actions">
-                <a className="button button-primary" href="#consent">Join the wire</a>
-                <Link className="button button-secondary" to="/sms-consent">Review consent proof</Link>
+                <a className="button button-primary" href="#getting-started">Get started</a>
+                <a className="button button-secondary" href={repoUrl} target="_blank" rel="noreferrer">View on GitHub</a>
               </div>
 
-              <div className="telegraph-note">
-                <span>TRANSACTIONAL ONLY</span>
-                <span>2FA, alerts, and direct reply prompts</span>
-                <span>No marketing campaigns crossing this line</span>
+              <div className="signal-strip" aria-label="Roscoe capabilities">
+                {productSignals.map((signal) => (
+                  <span key={signal}>{signal}</span>
+                ))}
               </div>
             </div>
             <HeroScene />
           </div>
         </section>
 
-        <section className="marquee">
-          <span>Events</span>
-          <span>2FA</span>
-          <span>Account Notifications</span>
-          <span>Guild Lane Alerts</span>
-          <span>Direct Reply Prompts</span>
-        </section>
-
-        <section className="story-grid">
-          <article className="paper-panel">
-            <h2>What Roscoe sends</h2>
-            <p>{programDescription}</p>
-            <ul>
-              {frontierHighlights.map((highlight) => (
-                <li key={highlight}>{highlight}</li>
-              ))}
-            </ul>
-          </article>
-
-          <aside className="paper-panel">
-            <h2>Why the consent surface is plain</h2>
-            <p>
-              Twilio reviewers need to see the real program in plain language. That means no prechecked boxes, no vague promises, and no hiding the rates, HELP, STOP, privacy, or terms copy.
-            </p>
-            <p>{privacyDisclosure}</p>
-          </aside>
-        </section>
-
-        <section className="dispatch-strip">
-          <div className="dispatch-strip-copy">
-            <p className="eyebrow">Trail Map</p>
-            <h2>Roscoe works like a frontier office, not a newsletter.</h2>
-            <p>
-              Each message has one job: prove account access, report work progress, flag account state, or ask the operator a question that keeps the lane moving. The proof trail lives in the consent ledger from the first click onward.
-            </p>
+        <section className="support-band">
+          <div className="support-band-copy">
+            <p className="eyebrow">What Roscoe Actually Does</p>
+            <h2>It is not another chatbot shell. It is an operator sitting between the transcript and the next message.</h2>
           </div>
-          <ol className="trail-list">
-            <li>
-              <strong>Scout</strong>
-              <span>You opt in from a public web form with no prechecked consent.</span>
-            </li>
-            <li>
-              <strong>Wire</strong>
-              <span>Roscoe sends verification codes, Guild alerts, and reply prompts only when tied to active work.</span>
-            </li>
-            <li>
-              <strong>Ledger</strong>
-              <span>The timestamp, categories, source path, and message program stay stored so the proof path is reviewable.</span>
-            </li>
+          <div className="support-band-grid">
+            {developerPillars.map((pillar) => (
+              <article key={pillar.label}>
+                <strong>{pillar.label}</strong>
+                <p>{pillar.detail}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="workflow-section">
+          <div className="workflow-intro">
+            <p className="eyebrow">How The Loop Works</p>
+            <h2>One operator, many Guild lanes, constant proof.</h2>
+          </div>
+          <ol className="workflow-list">
+            {workflowMoments.map((moment, index) => (
+              <li key={moment.title}>
+                <span className="workflow-index">0{index + 1}</span>
+                <div>
+                  <strong>{moment.title}</strong>
+                  <p>{moment.body}</p>
+                </div>
+              </li>
+            ))}
           </ol>
         </section>
 
-        <section className="signal-section" id="consent">
-          <div className="section-heading">
-            <p className="eyebrow">Join The Wire</p>
-            <h2>Subscribe for verification codes, account alerts, and Roscoe build prompts.</h2>
-            <p>{consentDisclosure}</p>
+        <section className="developer-surface" id="getting-started">
+          <div className="developer-copy">
+            <p className="eyebrow">Getting Started</p>
+            <h2>Bring Roscoe into the repo, onboard intent, and launch the lane stack.</h2>
+            <p>
+              Roscoe is for teams that already live in the terminal. The workflow starts with onboarding, builds a project brief, then opens continuous sessions that can resume after relaunch and route developer questions back over SMS when needed.
+            </p>
           </div>
+          <div className="code-rail">
+            <div className="code-rail-head">
+              <span>quickstart.sh</span>
+              <span>Apache 2.0</span>
+            </div>
+            <pre>
+              <code>{commandDeck.join("\n")}</code>
+            </pre>
+            <div className="code-links">
+              <a href={docsUrl} target="_blank" rel="noreferrer">Read the docs</a>
+              <a href={repoUrl} target="_blank" rel="noreferrer">Inspect the code</a>
+            </div>
+          </div>
+        </section>
 
-          <div className="consent-layout">
+        <section className="docs-section" id="docs">
+          <div className="docs-copy">
+            <p className="eyebrow">Docs Surface</p>
+            <h2>Built for developers who want the source, the setup, and the operational model in one place.</h2>
+            <p>
+              The repo ships the terminal app, the Roscoe site, the onboarding memory system, and the deploy path. The docs should answer how to install it, how sessions resume, how Roscoe decides confidence, and how the human escalation channels work.
+            </p>
+          </div>
+          <div className="docs-columns">
+            <div>
+              <h3>For maintainers</h3>
+              <p>Deployment manifests, cluster ingress, cert-manager, Cloudflare routing, and site build flow.</p>
+            </div>
+            <div>
+              <h3>For operators</h3>
+              <p>Project onboarding, transcript-first monitoring, confidence controls, and relaunch continuity.</p>
+            </div>
+            <div>
+              <h3>For contributors</h3>
+              <p>Lint, test, build, and the rules Roscoe uses to keep proof ahead of implementation.</p>
+            </div>
+          </div>
+        </section>
+
+        <section className="open-source-section" id="open-source">
+          <div className="open-source-copy">
+            <p className="eyebrow">Open Source Roscoe</p>
+            <h2>Licensed for real use, built for inspection, and intended to be adapted.</h2>
+            <p>
+              Roscoe is Apache 2.0 licensed, designed for developers who want to run the operator locally, inspect every prompt path, and tune the workflow to their own repositories and teams.
+            </p>
+          </div>
+          <div className="open-source-actions">
+            <a className="button button-primary" href={repoUrl} target="_blank" rel="noreferrer">Browse the repository</a>
+            <a className="button button-secondary" href={docsUrl} target="_blank" rel="noreferrer">Read setup and deploy notes</a>
+          </div>
+        </section>
+
+        <section className="compliance-section" id="consent">
+          <div className="compliance-copy">
+            <p className="eyebrow">Quiet Compliance Layer</p>
+            <h2>SMS consent exists for real operator alerts, not as the story of the product.</h2>
+            <p>
+              Roscoe can text verification codes, account notifications, work-progress alerts, and direct developer prompts. The public proof surface stays available for Twilio review, but it sits below the product story where it belongs.
+            </p>
+            <p>{programDescription}</p>
+          </div>
+          <div className="compliance-layout">
             <ConsentForm sourcePath="/" />
-            <div className="message-board">
-              <h3>Sample messages</h3>
+            <div className="message-board compliance-board">
+              <h3>Program proof</h3>
+              <div className="consent-badges" aria-label="Message categories">
+                {consentCategories.map((category) => (
+                  <span key={category} className="category-pill">{category}</span>
+                ))}
+              </div>
               <div className="sample-message">
                 <strong>Verification</strong>
                 <p>{sampleMessages.twoFactor}</p>
               </div>
               <div className="sample-message">
-                <strong>Guild alert</strong>
+                <strong>Work alert</strong>
                 <p>{sampleMessages.progressAlert}</p>
               </div>
+              <p className="disclaimer">{consentDisclosure}</p>
+              <p className="disclaimer">{privacyDisclosure}</p>
+              <div className="compliance-links">
+                <Link to="/sms-consent">Proof of consent</Link>
+                <Link to="/privacy">Privacy</Link>
+                <Link to="/terms">Terms</Link>
+              </div>
             </div>
-          </div>
-        </section>
-
-        <section className="trust-section">
-          <div className="trust-copy">
-            <p className="eyebrow">Trust, Policies, And Proof</p>
-            <h2>Need the plain-language paperwork?</h2>
-            <p>
-              Twilio reviewers, operators, and future Guild riders can inspect the exact consent surface, the privacy promise, and the wire terms before any number is added to the ledger.
-            </p>
-          </div>
-          <div className="trust-links">
-            <Link className="button button-primary" to="/sms-consent">Open proof-of-consent</Link>
-            <Link className="button button-secondary trust-link" to="/privacy">Privacy policy</Link>
-            <Link className="button button-secondary trust-link" to="/terms">Terms &amp; conditions</Link>
-            <a className="button button-secondary trust-link" href="mailto:hello@roscoe.sh">hello@roscoe.sh</a>
           </div>
         </section>
       </main>

@@ -11,15 +11,16 @@ function renderRoute(path: string) {
 }
 
 describe("site routes", () => {
-  it("renders the frontier hero and consent entrypoint on the home page", () => {
+  it("renders the developer-focused hero and compliance entrypoint on the home page", () => {
     renderRoute("/");
 
     expect(
       screen.getByRole("heading", {
-        name: /autopilot for claude & codex, styled like a wagon-train telegraph office/i,
+        name: /roscoe runs the reply loop for claude code and codex/i,
       }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /join the wire/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /get started/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /sms consent exists for real operator alerts/i })).toBeInTheDocument();
     expect(screen.getByText(/transactional sms only\. no marketing\./i)).toBeInTheDocument();
   });
 
