@@ -20,8 +20,17 @@ describe("site routes", () => {
       }),
     ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /get started/i })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /sms consent exists for real operator alerts/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /sms for real alerts/i })).toBeInTheDocument();
     expect(screen.getByText(/transactional sms only\. no marketing\./i)).toBeInTheDocument();
+  });
+
+  it("renders the docs page with install and onboarding guidance", () => {
+    renderRoute("/docs");
+
+    expect(screen.getByRole("heading", { name: /install roscoe\. train it\. run the lane stack/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: /^install$/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /onboard/i })).toBeInTheDocument();
+    expect(screen.getByText(/roscoe onboard \/path\/to\/project/i)).toBeInTheDocument();
   });
 
   it("renders the public sms consent proof page", () => {

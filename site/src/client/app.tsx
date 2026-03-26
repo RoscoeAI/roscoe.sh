@@ -9,7 +9,6 @@ import {
 import { ConsentForm } from "./components/ConsentForm";
 
 const repoUrl = "https://github.com/K12io/roscoe.sh";
-const docsUrl = "https://github.com/K12io/roscoe.sh#readme";
 
 const commandDeck = [
   "npm install -g roscoe",
@@ -60,7 +59,7 @@ function SiteFrame({ children }: { children: React.ReactNode }) {
         <Link className="brandmark" to="/">ROSCOE</Link>
         <nav className="topnav">
           <a href="/#getting-started">Getting started</a>
-          <a href="/#docs">Docs</a>
+          <Link to="/docs">Docs</Link>
           <a href="/#open-source">Open source</a>
           <Link to="/sms-consent">SMS Consent</Link>
           <Link to="/privacy">Privacy</Link>
@@ -120,7 +119,7 @@ function HomePage() {
         <section className="hero">
           <div className="hero-inner">
             <div className="hero-copy">
-              <p className="eyebrow">Autonomous CLI Dispatch For Developers</p>
+              <p className="eyebrow">CLI Autopilot</p>
               <h1>Roscoe runs the reply loop for Claude Code and Codex.</h1>
               <p className="hero-text">
                 Open-source autopilot for CLI-native development. Roscoe watches the transcript, keeps Guild workers aligned to the brief, drafts the next answer, and escalates to a human only when the work truly needs judgment.
@@ -142,8 +141,8 @@ function HomePage() {
 
         <section className="support-band">
           <div className="support-band-copy">
-            <p className="eyebrow">What Roscoe Actually Does</p>
-            <h2>It is not another chatbot shell. It is an operator sitting between the transcript and the next message.</h2>
+            <p className="eyebrow">What It Does</p>
+            <h2>Roscoe watches. Guild works. You step in when it matters.</h2>
           </div>
           <div className="support-band-grid">
             {developerPillars.map((pillar) => (
@@ -157,8 +156,8 @@ function HomePage() {
 
         <section className="workflow-section">
           <div className="workflow-intro">
-            <p className="eyebrow">How The Loop Works</p>
-            <h2>One operator, many Guild lanes, constant proof.</h2>
+            <p className="eyebrow">Workflow</p>
+            <h2>One operator. Many lanes.</h2>
           </div>
           <ol className="workflow-list">
             {workflowMoments.map((moment, index) => (
@@ -176,7 +175,7 @@ function HomePage() {
         <section className="developer-surface" id="getting-started">
           <div className="developer-copy">
             <p className="eyebrow">Getting Started</p>
-            <h2>Bring Roscoe into the repo, onboard intent, and launch the lane stack.</h2>
+            <h2>Install, onboard, launch.</h2>
             <p>
               Roscoe is for teams that already live in the terminal. The workflow starts with onboarding, builds a project brief, then opens continuous sessions that can resume after relaunch and route developer questions back over SMS when needed.
             </p>
@@ -190,7 +189,7 @@ function HomePage() {
               <code>{commandDeck.join("\n")}</code>
             </pre>
             <div className="code-links">
-              <a href={docsUrl} target="_blank" rel="noreferrer">Read the docs</a>
+              <Link to="/docs">Read the docs</Link>
               <a href={repoUrl} target="_blank" rel="noreferrer">Inspect the code</a>
             </div>
           </div>
@@ -198,46 +197,36 @@ function HomePage() {
 
         <section className="docs-section" id="docs">
           <div className="docs-copy">
-            <p className="eyebrow">Docs Surface</p>
-            <h2>Built for developers who want the source, the setup, and the operational model in one place.</h2>
+            <p className="eyebrow">Docs</p>
+            <h2>Read the rules. Run the loop.</h2>
             <p>
-              The repo ships the terminal app, the Roscoe site, the onboarding memory system, and the deploy path. The docs should answer how to install it, how sessions resume, how Roscoe decides confidence, and how the human escalation channels work.
+              The docs cover install, onboarding, runtime controls, session continuity, SMS handoff, and deployment.
             </p>
           </div>
-          <div className="docs-columns">
-            <div>
-              <h3>For maintainers</h3>
-              <p>Deployment manifests, cluster ingress, cert-manager, Cloudflare routing, and site build flow.</p>
-            </div>
-            <div>
-              <h3>For operators</h3>
-              <p>Project onboarding, transcript-first monitoring, confidence controls, and relaunch continuity.</p>
-            </div>
-            <div>
-              <h3>For contributors</h3>
-              <p>Lint, test, build, and the rules Roscoe uses to keep proof ahead of implementation.</p>
-            </div>
+          <div className="docs-callout">
+            <p>Operators, maintainers, and contributors all start in the same place.</p>
+            <Link className="button button-primary" to="/docs">Open docs</Link>
           </div>
         </section>
 
         <section className="open-source-section" id="open-source">
           <div className="open-source-copy">
-            <p className="eyebrow">Open Source Roscoe</p>
-            <h2>Licensed for real use, built for inspection, and intended to be adapted.</h2>
+            <p className="eyebrow">Open Source</p>
+            <h2>Apache 2.0. Built to inspect.</h2>
             <p>
               Roscoe is Apache 2.0 licensed, designed for developers who want to run the operator locally, inspect every prompt path, and tune the workflow to their own repositories and teams.
             </p>
           </div>
           <div className="open-source-actions">
             <a className="button button-primary" href={repoUrl} target="_blank" rel="noreferrer">Browse the repository</a>
-            <a className="button button-secondary" href={docsUrl} target="_blank" rel="noreferrer">Read setup and deploy notes</a>
+            <Link className="button button-secondary" to="/docs">Read setup notes</Link>
           </div>
         </section>
 
         <section className="compliance-section" id="consent">
           <div className="compliance-copy">
-            <p className="eyebrow">Quiet Compliance Layer</p>
-            <h2>SMS consent exists for real operator alerts, not as the story of the product.</h2>
+            <p className="eyebrow">SMS</p>
+            <h2>SMS for real alerts.</h2>
             <p>
               Roscoe can text verification codes, account notifications, work-progress alerts, and direct developer prompts. The public proof surface stays available for Twilio review, but it sits below the product story where it belongs.
             </p>
@@ -268,6 +257,74 @@ function HomePage() {
                 <Link to="/terms">Terms</Link>
               </div>
             </div>
+          </div>
+        </section>
+      </main>
+    </SiteFrame>
+  );
+}
+
+function DocsPage() {
+  return (
+    <SiteFrame>
+      <main className="paper-page docs-page">
+        <section className="page-hero">
+          <p className="eyebrow">Docs</p>
+          <h1>Install Roscoe. Train it. Run the lane stack.</h1>
+          <p>
+            Roscoe is an Apache 2.0 licensed operator for Claude Code and Codex. It watches live CLI sessions, drafts replies, preserves continuity across relaunch, and asks for help only when the work needs a human decision.
+          </p>
+        </section>
+
+        <section className="docs-grid">
+          <article className="paper-panel">
+            <h2>Install</h2>
+            <pre className="docs-pre"><code>{`npm install -g roscoe\nroscoe`}</code></pre>
+            <p>Roscoe runs as a local terminal app. The homepage and SMS consent site are separate from the CLI workflow.</p>
+          </article>
+
+          <article className="paper-panel">
+            <h2>Onboard</h2>
+            <pre className="docs-pre"><code>{`roscoe onboard /path/to/project`}</code></pre>
+            <p>Onboarding explores the repo, runs the intent interview, locks the provider, and saves the definition of done into project memory.</p>
+          </article>
+
+          <article className="paper-panel">
+            <h2>Launch</h2>
+            <pre className="docs-pre"><code>{`roscoe start codex@/path/to/project\nroscoe start claude-code@/path/to/project`}</code></pre>
+            <p>Each lane resumes from its saved session state, including provider thread IDs, transcript, summaries, and Roscoe’s working context.</p>
+          </article>
+
+          <article className="paper-panel">
+            <h2>Runtime</h2>
+            <p>Projects stay locked to the provider chosen during onboarding. Within that provider, Roscoe can manage model and reasoning automatically or let the operator adjust them.</p>
+          </article>
+
+          <article className="paper-panel">
+            <h2>Proof Rules</h2>
+            <p>Roscoe is tuned tests-first. Frontend, backend, unit or component tests, and e2e tests all have to line up before work is treated as done.</p>
+          </article>
+
+          <article className="paper-panel">
+            <h2>SMS</h2>
+            <p>SMS is optional. Roscoe can send progress alerts, verification codes, and question prompts. The public proof pages exist for compliance, not marketing.</p>
+            <div className="docs-inline-links">
+              <Link to="/sms-consent">Consent proof</Link>
+              <Link to="/privacy">Privacy</Link>
+              <Link to="/terms">Terms</Link>
+            </div>
+          </article>
+        </section>
+
+        <section className="docs-bottom">
+          <div>
+            <p className="eyebrow">Repository</p>
+            <h2>Source first.</h2>
+            <p>Read the code, inspect the prompts, and follow the deploy path in the repository.</p>
+          </div>
+          <div className="open-source-actions">
+            <a className="button button-primary" href={repoUrl} target="_blank" rel="noreferrer">Browse GitHub</a>
+            <a className="button button-secondary" href="mailto:hello@roscoe.sh">hello@roscoe.sh</a>
           </div>
         </section>
       </main>
@@ -376,6 +433,7 @@ export function App() {
   return (
     <Routes>
       <Route path="/" element={<HomePage />} />
+      <Route path="/docs" element={<DocsPage />} />
       <Route path="/sms-consent" element={<SmsConsentPage />} />
       <Route path="/privacy" element={<PrivacyPage />} />
       <Route path="/terms" element={<TermsPage />} />
