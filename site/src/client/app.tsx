@@ -17,9 +17,9 @@ const commandDeck = [
 ];
 
 const productSignals = [
-  "Monitors Claude Code and Codex sessions side by side",
-  "Drafts replies with confidence scoring and human override",
-  "Texts you when a Guild lane needs a real decision",
+  "Prevents prompt lethargy in Codex and Claude CLI",
+  "Starts with Roscoe's onboarding interview",
+  "Keeps real local agents developing continuously",
 ];
 
 const workflowMoments = [
@@ -78,47 +78,12 @@ function SiteFrame({ children }: { children: React.ReactNode }) {
 function HeroScene() {
   return (
     <div className="hero-plate" aria-hidden="true">
-      <div className="plate-grid"></div>
-      <div className="plate-glow"></div>
-      <div className="signal-lines">
-        <span></span>
-        <span></span>
-        <span></span>
-      </div>
-      <div className="cli-window">
-        <div className="cli-topbar">
-          <span className="cli-dot"></span>
-          <span className="cli-dot"></span>
-          <span className="cli-dot"></span>
-          <span className="cli-title">nanobots:main · roscoe transcript</span>
-        </div>
-        <div className="cli-body">
-          <div className="cli-line cli-line-command">
-            <span className="cli-prompt">$</span>
-            <span>roscoe start codex@/Users/timheckel/Projects/node/nanobots</span>
-          </div>
-          <div className="cli-line">
-            <span className="cli-tag cli-tag-remote">GUILD</span>
-            <span>Codex found the failing payment edge in the webhook replay path.</span>
-          </div>
-          <div className="cli-line">
-            <span className="cli-tag cli-tag-local">ROSCOE</span>
-            <span>High confidence. Land the proof patch, rerun e2e, then report back.</span>
-          </div>
-          <div className="cli-line">
-            <span className="cli-tag cli-tag-status">STATUS</span>
-            <span>tests-first · confidence 92 · awaiting result</span>
-          </div>
-          <div className="cli-line cli-line-command">
-            <span className="cli-prompt">›</span>
-            <span>npm test -- payment-webhook.e2e</span>
-          </div>
-        </div>
-      </div>
-      <div className="telegraph-rings">
-        <span></span>
-        <span></span>
-        <span></span>
+      <div className="hero-image-shell">
+        <img
+          className="hero-image"
+          src="/hero-never-again.png"
+          alt="Retro terminal scene reading: your prompt has died of lethargy."
+        />
       </div>
     </div>
   );
@@ -131,10 +96,10 @@ function HomePage() {
         <section className="hero">
           <div className="hero-inner">
             <div className="hero-copy">
-              <p className="eyebrow">CLI Autopilot</p>
-              <h1>Reply autopilot for Claude Code and Codex.</h1>
+              <p className="eyebrow">Roscoe For Local Lanes</p>
+              <h1>Never Again.</h1>
               <p className="hero-text">
-                Roscoe watches the live CLI transcript, drafts the next answer, and escalates only when the work needs a human decision.
+                Roscoe keeps Codex and Claude CLI prompts from dying, starts with the onboarding interview, and keeps continuous development moving with real local agents.
               </p>
               <div className="hero-actions">
                 <a className="button button-primary" href="#getting-started">Get started</a>

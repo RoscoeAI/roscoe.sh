@@ -11,13 +11,18 @@ function renderRoute(path: string) {
 }
 
 describe("site routes", () => {
-  it("renders the developer-focused hero and compliance entrypoint on the home page", () => {
+  it("renders the rewritten home hero and compliance entrypoint on the home page", () => {
     renderRoute("/");
 
     expect(
       screen.getByRole("heading", {
-        name: /reply autopilot for claude code and codex/i,
+        name: /never again\./i,
       }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Roscoe keeps Codex and Claude CLI prompts from dying, starts with the onboarding interview, and keeps continuous development moving with real local agents\./i,
+      ),
     ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /get started/i })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /sms for real alerts/i })).toBeInTheDocument();
