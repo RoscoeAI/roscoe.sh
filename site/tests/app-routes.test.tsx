@@ -16,7 +16,7 @@ describe("site routes", () => {
 
     expect(
       screen.getByRole("heading", {
-        name: /roscoe runs the reply loop for claude code and codex/i,
+        name: /reply autopilot for claude code and codex/i,
       }),
     ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /get started/i })).toBeInTheDocument();

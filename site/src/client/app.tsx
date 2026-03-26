@@ -85,22 +85,34 @@ function HeroScene() {
         <span></span>
         <span></span>
       </div>
-      <div className="terminal-sheet">
-        <div className="sheet-header">
-          <span>ROSCOE</span>
-          <span>LIVE AUTOPILOT</span>
+      <div className="cli-window">
+        <div className="cli-topbar">
+          <span className="cli-dot"></span>
+          <span className="cli-dot"></span>
+          <span className="cli-dot"></span>
+          <span className="cli-title">nanobots:main · roscoe transcript</span>
         </div>
-        <div className="sheet-row">
-          <span className="sheet-label">REMOTE</span>
-          <span className="sheet-value">Codex traced the payment flow and found the failing edge.</span>
-        </div>
-        <div className="sheet-row">
-          <span className="sheet-label">ROSCOE</span>
-          <span className="sheet-value">High confidence. Ship the proof patch, rerun e2e, then send the status wire.</span>
-        </div>
-        <div className="sheet-row">
-          <span className="sheet-label">STATUS</span>
-          <span className="sheet-value">Tests-first · human-ready · confidence 92</span>
+        <div className="cli-body">
+          <div className="cli-line cli-line-command">
+            <span className="cli-prompt">$</span>
+            <span>roscoe start codex@/Users/timheckel/Projects/node/nanobots</span>
+          </div>
+          <div className="cli-line">
+            <span className="cli-tag cli-tag-remote">GUILD</span>
+            <span>Codex found the failing payment edge in the webhook replay path.</span>
+          </div>
+          <div className="cli-line">
+            <span className="cli-tag cli-tag-local">ROSCOE</span>
+            <span>High confidence. Land the proof patch, rerun e2e, then report back.</span>
+          </div>
+          <div className="cli-line">
+            <span className="cli-tag cli-tag-status">STATUS</span>
+            <span>tests-first · confidence 92 · awaiting result</span>
+          </div>
+          <div className="cli-line cli-line-command">
+            <span className="cli-prompt">›</span>
+            <span>npm test -- payment-webhook.e2e</span>
+          </div>
         </div>
       </div>
       <div className="telegraph-rings">
@@ -120,9 +132,9 @@ function HomePage() {
           <div className="hero-inner">
             <div className="hero-copy">
               <p className="eyebrow">CLI Autopilot</p>
-              <h1>Roscoe runs the reply loop for Claude Code and Codex.</h1>
+              <h1>Reply autopilot for Claude Code and Codex.</h1>
               <p className="hero-text">
-                Open-source autopilot for CLI-native development. Roscoe watches the transcript, keeps Guild workers aligned to the brief, drafts the next answer, and escalates to a human only when the work truly needs judgment.
+                Roscoe watches the live CLI transcript, drafts the next answer, and escalates only when the work needs a human decision.
               </p>
               <div className="hero-actions">
                 <a className="button button-primary" href="#getting-started">Get started</a>
