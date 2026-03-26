@@ -1,0 +1,307 @@
+#!/usr/bin/env node
+
+import { readFileSync, writeFileSync, appendFileSync, existsSync, rmSync } from "fs";
+
+const provider = process.argv[2];
+const args = process.argv.slice(3);
+const scenarioPath = process.env.MOCK_LLM_SCENARIO_FILE;
+const statePath = process.env.MOCK_LLM_STATE_FILE;
+const logPath = process.env.MOCK_LLM_LOG_FILE;
+
+if (!provider || !scenarioPath || !statePath) {
+  console.error("mock-llm-cli requires provider, MOCK_LLM_SCENARIO_FILE, and MOCK_LLM_STATE_FILE");
+  process.exit(2);
+}
+
+const scenario = JSON.parse(readFileSync(scenarioPath, "utf-8"));
+const parsed = provider === "codex" ? parseCodexArgs(args) : parseClaudeArgs(args);
+const { callIndex, call } = await reserveMatchingCallIndex(
+  scenario.calls || [],
+  statePath,
+  provider,
+  parsed,
+);
+if (!call) {
+  if (logPath) {
+    appendFileSync(
+      logPath,
+      `${JSON.stringify({
+        provider,
+        prompt: parsed.prompt,
+        resumeId: parsed.resumeId ?? null,
+        args,
+        matchedIndex: null,
+        noMatch: true,
+      })}\n`,
+    );
+  }
+  console.error(`No matching mock call configured for ${provider} prompt=${parsed.prompt} resume=${parsed.resumeId}`);
+  process.exit(2);
+} else if (logPath) {
+  appendFileSync(
+    logPath,
+    `${JSON.stringify({ provider, prompt: parsed.prompt, resumeId: parsed.resumeId ?? null, args, matchedIndex: callIndex })}\n`,
+  );
+}
+
+if (call.stderr) {
+  process.stderr.write(call.stderr);
+}
+
+await sleep(call.delayMs || 0);
+
+if (provider === "codex") {
+  await emitCodex(call, callIndex);
+} else {
+  await emitClaude(call, callIndex);
+}
+
+process.exit(call.exitCode ?? 0);
+
+async function emitClaude(call, index) {
+  if (call.toolActivity) {
+    println({
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        content_block: {
+          type: "tool_use",
+          name: call.toolActivity,
+        },
+      },
+    });
+  }
+
+  if (call.thinking) {
+    await sleep(call.chunkDelayMs || 0);
+    println({
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        delta: {
+          type: "thinking_delta",
+          thinking: call.thinking,
+        },
+      },
+    });
+  }
+
+  for (const chunk of getChunks(call.text || "")) {
+    await sleep(call.chunkDelayMs || 0);
+    println({
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        delta: {
+          type: "text_delta",
+          text: chunk,
+        },
+      },
+    });
+  }
+
+  await sleep(call.chunkDelayMs || 0);
+  println({
+    type: "result",
+    session_id: call.sessionId || `mock-claude-${index}`,
+    stop_reason: "end_turn",
+    result: call.resultText,
+  });
+}
+
+async function emitCodex(call, index) {
+  println({
+    type: "thread.started",
+    thread_id: call.sessionId || `mock-codex-${index}`,
+  });
+  println({ type: "turn.started" });
+
+  if (call.toolActivity) {
+    await sleep(call.chunkDelayMs || 0);
+    println({
+      type: "item.started",
+      item: {
+        id: "tool_0",
+        type: call.toolActivity,
+      },
+    });
+  }
+
+  await sleep(call.chunkDelayMs || 0);
+  println({
+    type: "item.completed",
+    item: {
+      id: "item_0",
+      type: "agent_message",
+      text: getText(call.text),
+    },
+  });
+
+  await sleep(call.chunkDelayMs || 0);
+  println({
+    type: "turn.completed",
+    usage: {
+      input_tokens: 1,
+      output_tokens: 1,
+    },
+  });
+}
+
+function getChunks(text) {
+  if (!text) return [];
+  if (Array.isArray(text)) return text;
+  return [text];
+}
+
+function getText(text) {
+  if (!text) return "";
+  if (Array.isArray(text)) return text.join("");
+  return text;
+}
+
+function parseClaudeArgs(args) {
+  const promptIndex = args.indexOf("-p");
+  const resumeIndex = args.indexOf("--resume");
+  return {
+    prompt: promptIndex === -1 ? "" : args[promptIndex + 1] || "",
+    resumeId: resumeIndex === -1 ? null : args[resumeIndex + 1] || null,
+  };
+}
+
+function parseCodexArgs(args) {
+  const execIndex = args.indexOf("exec");
+  if (execIndex === -1) {
+    throw new Error(`Unsupported codex invocation: ${args.join(" ")}`);
+  }
+
+  const valueOptions = new Set([
+    "-m",
+    "--model",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "-c",
+    "--config",
+    "-p",
+    "--profile",
+    "-C",
+    "--cd",
+    "--add-dir",
+  ]);
+  const execArgs = args.slice(execIndex + 1);
+  const resumeIndex = execArgs.indexOf("resume");
+  const isResume = resumeIndex !== -1;
+  const positional = [];
+
+  for (let i = 0; i < execArgs.length; i += 1) {
+    const value = execArgs[i];
+    if (i === resumeIndex && value === "resume") {
+      continue;
+    }
+    if (value === "--json" || value === "--skip-git-repo-check" || value === "--dangerously-bypass-approvals-and-sandbox") {
+      continue;
+    }
+    if (value.includes("=") && value.startsWith("--")) {
+      continue;
+    }
+    if (valueOptions.has(value)) {
+      i += 1;
+      continue;
+    }
+    if (value.startsWith("-")) {
+      continue;
+    }
+    positional.push(value);
+  }
+
+  if (isResume) {
+    return {
+      resumeId: positional.at(-2) || null,
+      prompt: positional.at(-1) || "",
+    };
+  }
+
+  return {
+    resumeId: null,
+    prompt: positional.at(-1) || "",
+  };
+}
+
+function println(value) {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+function findMatchingCallIndex(calls, used, provider, parsed) {
+  return calls.findIndex((call, index) => {
+    if (used.includes(index)) return false;
+    if (call.provider !== provider) return false;
+    if ((call.resumeId || null) !== (parsed.resumeId || null)) return false;
+
+    if (call.promptIncludes && !parsed.prompt.includes(call.promptIncludes)) {
+      return false;
+    }
+
+    if (Array.isArray(call.promptIncludesAll)) {
+      if (!call.promptIncludesAll.every((needle) => parsed.prompt.includes(needle))) {
+        return false;
+      }
+    }
+
+    if (Array.isArray(call.promptExcludesAll)) {
+      if (call.promptExcludesAll.some((needle) => parsed.prompt.includes(needle))) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
+
+async function reserveMatchingCallIndex(calls, statePath, provider, parsed) {
+  return withFileLock(`${statePath}.lock`, async () => {
+    const state = existsSync(statePath)
+      ? JSON.parse(readFileSync(statePath, "utf-8"))
+      : { used: [] };
+    const callIndex = findMatchingCallIndex(calls, state.used || [], provider, parsed);
+    if (callIndex !== -1) {
+      writeFileSync(statePath, JSON.stringify({ used: [...(state.used || []), callIndex] }));
+    }
+    return {
+      callIndex,
+      call: callIndex === -1 ? null : calls[callIndex],
+    };
+  });
+}
+
+async function withFileLock(lockPath, fn) {
+  const started = Date.now();
+  for (;;) {
+    try {
+      writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+      break;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
+        if (Date.now() - started > 5000) {
+          throw new Error(`Timed out waiting for mock scenario lock: ${lockPath}`);
+        }
+        await sleep(5);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  try {
+    return await fn();
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+}
+
+function sleep(ms) {
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}

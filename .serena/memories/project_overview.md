@@ -1,0 +1,18 @@
+# llmResponder overview
+- Purpose: terminal-based AI co-pilot for supervising multiple LLM coding sessions, suggesting next replies, automating browser steps, coordinating worker sessions, and onboarding projects into reusable context.
+- Stack: TypeScript, Node.js ESM (`module`/`moduleResolution` `Node16`), React 19, Ink 6, `@inkjs/ui`, Commander, dotenv, marked/marked-terminal, Vitest, tsx.
+- Runtime model: `src/index.ts` defines the CLI. The default action renders an Ink TUI. `start` opens session monitoring, `onboard` runs project onboarding, and non-TUI commands expose projects/worktrees/profiles.
+- Main architecture:
+  - `src/app.tsx`: reducer-driven app shell and screen router (`home`, `session-setup`, `session-view`, `onboarding`).
+  - `src/services/session-manager.ts`: high-level session orchestration; creates monitored sessions, generates suggestions, injects replies, and executes browser/orchestrator actions.
+  - `src/session-monitor.ts`, `src/conversation-tracker.ts`, `src/input-injector.ts`: low-level session IO, transcript tracking, and text injection.
+  - `src/response-generator.ts`: builds generation context and spawns a Claude sidecar (`claude -p ... --output-format stream-json`) to produce JSON suggestions with confidence and optional browser/orchestrator actions.
+  - `src/orchestrator.ts`: manages worker sessions and forwards plan/review/input actions.
+  - `src/browser-agent.ts`: browser/session wrapper used for screenshots, navigation, snapshots, login flows, and page interaction.
+  - `src/worktree-manager.ts`: git worktree create/list/remove and dependency installation for task-specific worktrees.
+  - `src/config.ts`: profile loading, auth profile loading, and persisted project registry/context access.
+  - `src/onboarder.ts`: onboarding interview runner that saves project context for later suggestions.
+  - `src/components/*` and `src/hooks/*`: Ink UI screens and behavior hooks.
+- Repo layout: top-level files are `package.json`, `tsconfig.json`, `vitest.config.ts`, `sidecar-prompt.md`, `profiles/`, and `src/`. There is no README in the repo.
+- Profiles: built-in LLM profiles currently include `codex` and `claude-code`; auth profiles live under `profiles/auth/`.
+- Current baseline on initialization: this workspace is not a git repo itself, but the automated test suite passes cleanly.

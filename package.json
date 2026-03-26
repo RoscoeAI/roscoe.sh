@@ -1,0 +1,57 @@
+{
+  "name": "roscoe",
+  "version": "0.1.0",
+  "description": "AI co-pilot that monitors concurrent LLM conversations and suggests replies",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "roscoe": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint src",
+    "lint:fix": "npm run lint -- --fix",
+    "site:dev": "npm --prefix site run dev",
+    "site:build": "npm --prefix site run build",
+    "site:test": "npm --prefix site run test",
+    "site:lint": "npm --prefix site run lint",
+    "start": "tsx src/index.ts",
+    "dev": "tsx src/index.ts start claude-code",
+    "dev:sms-webhook-tunnel": "sh -c 'cloudflared tunnel --config \"${ROSCOE_CLOUDFLARED_CONFIG:-$HOME/.cloudflared/roscoe-sms-dev.yml}\" run \"${ROSCOE_CLOUDFLARED_TUNNEL:-roscoe-sms-dev}\"'",
+    "profiles": "tsx src/index.ts profiles",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [
+    "llm",
+    "ai",
+    "proxy",
+    "terminal"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@inkjs/ui": "^2.0.0",
+    "@types/react": "^19.2.14",
+    "commander": "^14.0.3",
+    "dotenv": "^17.3.1",
+    "ink": "^6.8.0",
+    "marked": "^17.0.4",
+    "marked-terminal": "^7.3.0",
+    "react": "^19.2.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.4.0",
+    "@vitest/coverage-v8": "^4.0.18",
+    "eslint": "^10.1.0",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "globals": "^17.4.0",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.57.2",
+    "vitest": "^4.0.18"
+  }
+}

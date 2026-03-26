@@ -1,0 +1,144 @@
+# Roscoe.sh production deployment on the shared Hetzner K3s cluster.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: roscoe-site-creds
+data:
+  .dockerconfigjson: DOCKER_CONFIG
+type: kubernetes.io/dockerconfigjson
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: prod-roscoe-site-envs
+data:
+  ROSCOE_SITE_DATABASE_URL: PROD_ROSCOE_SITE_DATABASE_URL_SECRET
+  ROSCOE_SITE_BASE_URL: PROD_ROSCOE_SITE_BASE_URL_SECRET
+  ROSCOE_SITE_SUPPORT_EMAIL: PROD_ROSCOE_SITE_SUPPORT_EMAIL_SECRET
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: roscoe-site-prod
+  labels:
+    app: roscoe-site-prod
+spec:
+  selector:
+    matchLabels:
+      app: roscoe-site-prod
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: roscoe-site-prod
+    spec:
+      containers:
+        - name: roscoe-site-prod
+          image: timheckel/roscoe-site:IMAGE_LABEL
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3000"
+            - name: ROSCOE_SITE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: prod-roscoe-site-envs
+                  key: ROSCOE_SITE_DATABASE_URL
+            - name: ROSCOE_SITE_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: prod-roscoe-site-envs
+                  key: ROSCOE_SITE_BASE_URL
+            - name: ROSCOE_SITE_SUPPORT_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: prod-roscoe-site-envs
+                  key: ROSCOE_SITE_SUPPORT_EMAIL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 150m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      imagePullSecrets:
+        - name: roscoe-site-creds
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: roscoe-site-prod-service
+  labels:
+    app: roscoe-site-prod-service
+  annotations:
+    traefik.ingress.kubernetes.io/affinity: "true"
+    traefik.ingress.kubernetes.io/session-cookie-name: "roscoe-site-sticky"
+spec:
+  type: ClusterIP
+  selector:
+    app: roscoe-site-prod
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: roscoe-site-prod-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+    external-dns.alpha.kubernetes.io/hostname: "roscoe.sh,www.roscoe.sh"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - roscoe.sh
+        - www.roscoe.sh
+      secretName: roscoe-site-tls-cert
+  rules:
+    - host: roscoe.sh
+      http:
+        paths:
+          - pathType: Prefix
+            path: /
+            backend:
+              service:
+                name: roscoe-site-prod-service
+                port:
+                  number: 80
+    - host: www.roscoe.sh
+      http:
+        paths:
+          - pathType: Prefix
+            path: /
+            backend:
+              service:
+                name: roscoe-site-prod-service
+                port:
+                  number: 80

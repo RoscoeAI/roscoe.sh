@@ -1,0 +1,6 @@
+{
+  "name": "claude-code",
+  "command": "claude",
+  "args": [],
+  "protocol": "claude"
+}

@@ -1,0 +1,10 @@
+{
+  "name": "localhost-dev",
+  "url": "http://localhost:3000/login",
+  "steps": [
+    { "action": "fill", "ref": "#email", "value": "${APP_EMAIL}" },
+    { "action": "fill", "ref": "#password", "value": "${APP_PASSWORD}" },
+    { "action": "click", "ref": "button[type=submit]" },
+    { "action": "wait", "value": "2000" }
+  ]
+}

@@ -1,0 +1,15 @@
+# Suggested commands
+- Install deps: `npm install`
+- Run the interactive app shell: `npm start`
+- Start monitoring sessions directly: `npm start -- start claude-code` or `npm run dev`
+- Onboard a project directory: `npm start -- onboard /absolute/path/to/project`
+- List LLM/auth profiles: `npm run profiles`
+- List onboarded projects: `npm start -- projects`
+- List worktrees for a project: `npm start -- worktrees /absolute/path/to/project`
+- Remove a worktree: `npm start -- worktree-remove /absolute/path/to/project task-name`
+- Run full tests: `npm test`
+- Run tests in watch mode: `npm run test:watch`
+- Run coverage: `npm run test:coverage`
+- Build TypeScript output: `npm run build`
+- Preferred code search in this workspace: `rg pattern src` and `rg --files src`
+- Useful Darwin shell commands: `pwd`, `ls`, `cd`, `find`, `rg`, `git`, `sed -n 'start,endp' file`, `open`.

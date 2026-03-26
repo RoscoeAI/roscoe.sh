@@ -1,0 +1,108 @@
+name: Build and Deploy Roscoe.sh Site to Hetzner K3s Production
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "site/**"
+      - ".github/workflows/deploy-roscoe-site-k3.yml"
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  test:
+    name: Run Site Checks
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install site dependencies
+        run: npm ci --prefix site
+
+      - name: Lint site
+        run: npm --prefix site run lint
+
+      - name: Test site
+        run: npm --prefix site run test
+
+      - name: Build site
+        run: npm --prefix site run build
+
+  build-and-deploy-to-prod:
+    name: Build and Deploy Site
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    needs: [test]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set Kubernetes context
+        uses: Azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.HETZNER_KUBE_CONFIG }}
+
+      - name: Docker Build and Push, Kubernetes Deploy
+        run: |
+          export RELEASE="0.1.$(git rev-list --count HEAD)"
+          echo "Building Roscoe.sh site version: $RELEASE"
+
+          docker build --no-cache \
+            -f site/Dockerfile \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/roscoe-site:$RELEASE \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/roscoe-site:latest \
+            site
+
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/roscoe-site:$RELEASE
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/roscoe-site:latest
+
+          cd ./site
+
+          DATABASE_URL_B64=$(echo -n "${{ secrets.PROD_ROSCOE_SITE_DATABASE_URL }}" | base64 -w 0)
+          BASE_URL_B64=$(echo -n "${{ secrets.PROD_ROSCOE_SITE_BASE_URL }}" | base64 -w 0)
+          SUPPORT_EMAIL_B64=$(echo -n "${{ secrets.PROD_ROSCOE_SITE_SUPPORT_EMAIL }}" | base64 -w 0)
+          DOCKER_CONFIG_B64=$(cat ~/.docker/config.json | base64 -w 0)
+
+          sed -i'' \
+            -e "s|PROD_ROSCOE_SITE_DATABASE_URL_SECRET|$DATABASE_URL_B64|g" \
+            -e "s|PROD_ROSCOE_SITE_BASE_URL_SECRET|$BASE_URL_B64|g" \
+            -e "s|PROD_ROSCOE_SITE_SUPPORT_EMAIL_SECRET|$SUPPORT_EMAIL_B64|g" \
+            -e "s|IMAGE_LABEL|$RELEASE|g" \
+            -e "s|DOCKER_CONFIG|$DOCKER_CONFIG_B64|g" \
+            ./k3/prod.yml
+
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.yaml || true
+          kubectl wait --for=condition=Available deployment/cert-manager -n cert-manager --timeout=120s || true
+          kubectl wait --for=condition=Available deployment/cert-manager-webhook -n cert-manager --timeout=120s || true
+          kubectl wait --for=condition=Available deployment/cert-manager-cainjector -n cert-manager --timeout=120s || true
+
+          kubectl apply -f ./k3/cert-manager.yml
+          kubectl apply -f ./k3/prod.yml
+
+      - name: Purge Cloudflare Cache
+        uses: jakejarvis/cloudflare-purge-action@master
+        env:
+          CLOUDFLARE_ZONE: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          CLOUDFLARE_TOKEN: ${{ secrets.CLOUDFLARE_PURGE_TOKEN }}
+          PURGE_URLS: '["https://roscoe.sh/*","https://www.roscoe.sh/*"]'
