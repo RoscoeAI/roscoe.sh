@@ -35,6 +35,17 @@ export class ConversationTracker {
     return [...this.messages];
   }
 
+  restoreHistory(messages: Message[]): void {
+    this.messages = messages
+      .filter((message) => message && typeof message.content === "string")
+      .map((message) => ({
+        role: message.role,
+        content: message.content,
+        timestamp: message.timestamp,
+      }));
+    this.pendingOutput = "";
+  }
+
   getRecentHistory(maxMessages = 20): Message[] {
     return this.messages.slice(-maxMessages);
   }

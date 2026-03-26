@@ -4,6 +4,8 @@ import { fileURLToPath } from "url";
 import { homedir } from "os";
 import { AuthProfile } from "./browser-agent.js";
 import { HeadlessProfile, LLMProtocol, RuntimeControlSettings } from "./llm-runtime.js";
+import type { TranscriptEntry } from "./types.js";
+import type { Message } from "./conversation-tracker.js";
 
 export interface LLMProfile extends HeadlessProfile {}
 export type InterviewSelectionMode = "single" | "multi";
@@ -86,6 +88,23 @@ export interface ProjectHistoryRecord {
   questions: InterviewQuestionRecord[];
   answers: InterviewAnswer[];
   briefSnapshot: ProjectContext;
+}
+
+export interface LaneSessionRecord {
+  laneKey: string;
+  projectDir: string;
+  projectName: string;
+  worktreePath: string;
+  worktreeName: string;
+  profileName: string;
+  protocol: LLMProtocol;
+  providerSessionId: string | null;
+  trackerHistory: Message[];
+  timeline: TranscriptEntry[];
+  outputLines: string[];
+  summary: string | null;
+  currentToolUse: string | null;
+  savedAt: string;
 }
 
 export interface ProjectRegistryEntry {
@@ -201,6 +220,21 @@ function getExistingProjectHistoryDir(projectDir: string): string | null {
   );
 }
 
+function getProjectSessionsPath(projectDir: string): string {
+  return join(getProjectMemoryDir(projectDir), "sessions.json");
+}
+
+function getLegacyProjectSessionsPath(projectDir: string): string {
+  return join(getLegacyProjectMemoryDir(projectDir), "sessions.json");
+}
+
+function getExistingProjectSessionsPath(projectDir: string): string | null {
+  return resolveExistingPath(
+    getProjectSessionsPath(projectDir),
+    getLegacyProjectSessionsPath(projectDir),
+  );
+}
+
 function isEphemeralE2eProject(directory: string): boolean {
   return /[/\\](?:roscoe|llm-responder)-[^/\\]*e2e-[^/\\]+[/\\]project$/.test(directory);
 }
@@ -271,6 +305,153 @@ function normalizeSmsNotificationSettings(value: unknown): SmsNotificationSettin
     phoneNumber: typeof typed.phoneNumber === "string" ? typed.phoneNumber : "",
     provider: "twilio",
   };
+}
+
+function normalizeMessageHistory(value: unknown): Message[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const typed = item as Record<string, unknown>;
+      if (
+        (typed.role !== "assistant" && typed.role !== "user" && typed.role !== "system") ||
+        typeof typed.content !== "string"
+      ) {
+        return null;
+      }
+
+      return {
+        role: typed.role,
+        content: typed.content,
+        timestamp: typeof typed.timestamp === "number" ? typed.timestamp : 0,
+      } as Message;
+    })
+    .filter((item): item is Message => item !== null);
+}
+
+function normalizeTranscriptEntry(value: unknown): TranscriptEntry | null {
+  if (!value || typeof value !== "object") return null;
+  const typed = value as Record<string, unknown>;
+  if (typeof typed.id !== "string" || typeof typed.timestamp !== "number" || typeof typed.kind !== "string") {
+    return null;
+  }
+
+  switch (typed.kind) {
+    case "remote-turn":
+      if (typeof typed.provider !== "string" || typeof typed.text !== "string") return null;
+      return {
+        id: typed.id,
+        timestamp: typed.timestamp,
+        kind: "remote-turn",
+        provider: typed.provider,
+        text: typed.text,
+        activity: typeof typed.activity === "string" ? typed.activity : null,
+        note: typeof typed.note === "string" ? typed.note : null,
+      };
+    case "local-suggestion":
+      if (
+        typeof typed.text !== "string" ||
+        typeof typed.confidence !== "number" ||
+        typeof typed.reasoning !== "string" ||
+        (typed.state !== "pending" && typed.state !== "dismissed")
+      ) {
+        return null;
+      }
+      return {
+        id: typed.id,
+        timestamp: typed.timestamp,
+        kind: "local-suggestion",
+        text: typed.text,
+        confidence: typed.confidence,
+        reasoning: typed.reasoning,
+        state: typed.state,
+      };
+    case "local-sent":
+      if (
+        typeof typed.text !== "string" ||
+        (typed.delivery !== "approved" && typed.delivery !== "edited" && typed.delivery !== "manual" && typed.delivery !== "auto")
+      ) {
+        return null;
+      }
+      return {
+        id: typed.id,
+        timestamp: typed.timestamp,
+        kind: "local-sent",
+        text: typed.text,
+        delivery: typed.delivery,
+        ...(typeof typed.confidence === "number" ? { confidence: typed.confidence } : {}),
+        ...(typeof typed.reasoning === "string" ? { reasoning: typed.reasoning } : {}),
+      };
+    case "tool-activity":
+      if (typeof typed.provider !== "string" || typeof typed.toolName !== "string" || typeof typed.text !== "string") return null;
+      return {
+        id: typed.id,
+        timestamp: typed.timestamp,
+        kind: "tool-activity",
+        provider: typed.provider,
+        toolName: typed.toolName,
+        text: typed.text,
+      };
+    case "error":
+      if (typeof typed.text !== "string" || (typed.source !== "sidecar" && typed.source !== "session")) return null;
+      return {
+        id: typed.id,
+        timestamp: typed.timestamp,
+        kind: "error",
+        text: typed.text,
+        source: typed.source,
+      };
+    default:
+      return null;
+  }
+}
+
+function normalizeTranscript(value: unknown): TranscriptEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => normalizeTranscriptEntry(item))
+    .filter((item): item is TranscriptEntry => item !== null);
+}
+
+function normalizeLaneSessionRecord(value: unknown): LaneSessionRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const typed = value as Record<string, unknown>;
+  if (
+    typeof typed.laneKey !== "string" ||
+    typeof typed.projectDir !== "string" ||
+    typeof typed.projectName !== "string" ||
+    typeof typed.worktreePath !== "string" ||
+    typeof typed.worktreeName !== "string" ||
+    typeof typed.profileName !== "string" ||
+    (typed.protocol !== "claude" && typed.protocol !== "codex")
+  ) {
+    return null;
+  }
+
+  return {
+    laneKey: typed.laneKey,
+    projectDir: typed.projectDir,
+    projectName: typed.projectName,
+    worktreePath: typed.worktreePath,
+    worktreeName: typed.worktreeName,
+    profileName: typed.profileName,
+    protocol: typed.protocol,
+    providerSessionId: typeof typed.providerSessionId === "string" ? typed.providerSessionId : null,
+    trackerHistory: normalizeMessageHistory(typed.trackerHistory),
+    timeline: normalizeTranscript(typed.timeline),
+    outputLines: normalizeStringArray(typed.outputLines),
+    summary: typeof typed.summary === "string" ? typed.summary : null,
+    currentToolUse: typeof typed.currentToolUse === "string" ? typed.currentToolUse : null,
+    savedAt: typeof typed.savedAt === "string" ? typed.savedAt : new Date(0).toISOString(),
+  };
+}
+
+function normalizeLaneSessionRecords(value: unknown): LaneSessionRecord[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => normalizeLaneSessionRecord(item))
+    .filter((item): item is LaneSessionRecord => item !== null)
+    .sort((a, b) => b.savedAt.localeCompare(a.savedAt));
 }
 
 function normalizeRoscoeSettings(value: unknown): RoscoeSettings {
@@ -558,4 +739,55 @@ export function updateProjectLastActive(directory: string): void {
     entry.lastActive = new Date().toISOString();
     saveRegistry(registry);
   }
+}
+
+export function buildLaneSessionKey(
+  projectDir: string,
+  worktreePath: string,
+  worktreeName: string,
+  profileName: string,
+): string {
+  return [
+    resolve(projectDir),
+    resolve(worktreePath),
+    worktreeName,
+    profileName,
+  ].join("::");
+}
+
+export function listLaneSessions(projectDir: string): LaneSessionRecord[] {
+  const sessionsPath = getExistingProjectSessionsPath(projectDir);
+  if (!sessionsPath || !existsSync(sessionsPath)) return [];
+
+  try {
+    const parsed = JSON.parse(readFileSync(sessionsPath, "utf-8")) as { sessions?: unknown };
+    return normalizeLaneSessionRecords(parsed.sessions);
+  } catch {
+    return [];
+  }
+}
+
+export function loadLaneSession(
+  projectDir: string,
+  worktreePath: string,
+  worktreeName: string,
+  profileName: string,
+): LaneSessionRecord | null {
+  const laneKey = buildLaneSessionKey(projectDir, worktreePath, worktreeName, profileName);
+  return listLaneSessions(projectDir).find((record) => record.laneKey === laneKey) ?? null;
+}
+
+export function saveLaneSession(record: LaneSessionRecord): void {
+  const dir = getProjectMemoryDir(record.projectDir);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const sessionsPath = getProjectSessionsPath(record.projectDir);
+  const existing = listLaneSessions(record.projectDir).filter((item) => item.laneKey !== record.laneKey);
+  existing.push({
+    ...record,
+    laneKey: buildLaneSessionKey(record.projectDir, record.worktreePath, record.worktreeName, record.profileName),
+    projectDir: resolve(record.projectDir),
+    worktreePath: resolve(record.worktreePath),
+  });
+  existing.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+  writeFileSync(sessionsPath, JSON.stringify({ sessions: existing }, null, 2));
 }

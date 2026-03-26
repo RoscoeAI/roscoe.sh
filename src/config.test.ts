@@ -21,6 +21,9 @@ import {
   listProjectHistory,
   loadRoscoeSettings,
   saveRoscoeSettings,
+  saveLaneSession,
+  loadLaneSession,
+  listLaneSessions,
 } from "./config.js";
 
 describe("config", () => {
@@ -213,6 +216,92 @@ describe("config", () => {
       vi.mocked(readFileSync).mockImplementation(() => { throw new Error("no file"); });
       registerProject("proj", "/tmp");
       expect(vi.mocked(writeFileSync)).toHaveBeenCalled();
+    });
+  });
+
+  describe("lane sessions", () => {
+    it("writes lane session snapshots under the project memory directory", () => {
+      saveLaneSession({
+        laneKey: "unused",
+        projectDir: "/tmp/proj",
+        projectName: "proj",
+        worktreePath: "/tmp/proj",
+        worktreeName: "main",
+        profileName: "codex",
+        protocol: "codex",
+        providerSessionId: "thread-1",
+        trackerHistory: [{ role: "assistant", content: "hello", timestamp: 1 }],
+        timeline: [],
+        outputLines: ["hello"],
+        summary: "summary",
+        currentToolUse: null,
+        savedAt: "2026-03-26T00:00:00.000Z",
+      });
+
+      expect(writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining("/tmp/proj/.roscoe/sessions.json"),
+        expect.stringContaining("\"providerSessionId\": \"thread-1\""),
+      );
+    });
+
+    it("loads a saved lane session by lane identity", () => {
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        sessions: [
+          {
+            laneKey: "/tmp/proj::/tmp/proj::main::codex",
+            projectDir: "/tmp/proj",
+            projectName: "proj",
+            worktreePath: "/tmp/proj",
+            worktreeName: "main",
+            profileName: "codex",
+            protocol: "codex",
+            providerSessionId: "thread-1",
+            trackerHistory: [{ role: "assistant", content: "hello", timestamp: 1 }],
+            timeline: [],
+            outputLines: ["hello"],
+            summary: "summary",
+            currentToolUse: null,
+            savedAt: "2026-03-26T00:00:00.000Z",
+          },
+        ],
+      }));
+
+      const record = loadLaneSession("/tmp/proj", "/tmp/proj", "main", "codex");
+      expect(record?.providerSessionId).toBe("thread-1");
+      expect(record?.trackerHistory[0]?.content).toBe("hello");
+    });
+
+    it("lists legacy lane sessions from .llm-responder when needed", () => {
+      vi.mocked(existsSync).mockImplementation((path: any) => {
+        const filePath = String(path);
+        if (filePath.includes("/tmp/proj/.roscoe/sessions.json")) return false;
+        if (filePath.includes("/tmp/proj/.llm-responder/sessions.json")) return true;
+        return false;
+      });
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        sessions: [
+          {
+            laneKey: "legacy",
+            projectDir: "/tmp/proj",
+            projectName: "proj",
+            worktreePath: "/tmp/proj",
+            worktreeName: "main",
+            profileName: "claude-code",
+            protocol: "claude",
+            providerSessionId: "sess-9",
+            trackerHistory: [],
+            timeline: [],
+            outputLines: [],
+            summary: null,
+            currentToolUse: null,
+            savedAt: "2026-03-26T00:00:00.000Z",
+          },
+        ],
+      }));
+
+      const sessions = listLaneSessions("/tmp/proj");
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].providerSessionId).toBe("sess-9");
     });
   });
 

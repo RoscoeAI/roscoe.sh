@@ -139,6 +139,90 @@ describe.sequential("Ink app e2e", () => {
       env.restore();
     }
   }, 15000);
+
+  it.each(["claude", "codex"] as const)("resumes the same native conversation after relaunch with %s", async (provider) => {
+    const env = createMockEnv([
+      {
+        provider,
+        promptIncludes: "You are a Guild coding agent",
+        sessionId: `${provider}-persist-1`,
+        text: provider === "claude" ? ["Initial plan\n"] : "Initial plan\n",
+      },
+      {
+        provider,
+        promptIncludes: "Respond in this EXACT JSON format",
+        text: '{"message":"Continue with the saved lane","confidence":88,"reasoning":"existing thread already has context"}',
+      },
+      {
+        provider,
+        promptIncludes: "Respond in this EXACT JSON format",
+        text: '{"message":"Continue with the saved lane","confidence":88,"reasoning":"existing thread already has context"}',
+      },
+      {
+        provider,
+        promptIncludes: "Continue with the saved lane",
+        resumeId: `${provider}-persist-1`,
+        sessionId: `${provider}-persist-1`,
+        text: provider === "claude" ? ["Resumed okay\n"] : "Resumed okay\n",
+      },
+    ]);
+
+    vi.spyOn(ResponseGenerator.prototype, "readClaudeTranscript").mockReturnValue([]);
+    vi.spyOn(ResponseGenerator.prototype, "readCodexTranscript").mockReturnValue([]);
+
+    const profile = makeProfile(
+      provider,
+      provider === "claude" ? env.claudeCommand : env.codexCommand,
+    );
+
+    vi.spyOn(config, "loadProfile").mockImplementation((name: string) => {
+      if (name !== provider) {
+        throw new Error(`Unexpected profile ${name}`);
+      }
+      return profile;
+    });
+    vi.spyOn(config, "loadProjectContext").mockReturnValue({
+      name: "Demo Project",
+      directory: env.projectDir,
+      goals: ["Ship a clean UX"],
+      milestones: ["First release"],
+      techStack: ["TypeScript", "Ink"],
+      notes: "Keep the flow keyboard-first.",
+    });
+
+    const firstApp = render(
+      <App
+        initialScreen="session-view"
+        startSpecs={[`${provider}@${env.projectDir}`]}
+      />,
+    );
+
+    try {
+      await waitForFrame(firstApp.lastFrame, (frame) => frame.includes("Continue with the saved lane"));
+      firstApp.unmount();
+
+      const secondApp = render(
+        <App
+          initialScreen="session-view"
+          startSpecs={[`${provider}@${env.projectDir}`]}
+        />,
+      );
+
+      try {
+        await waitForFrame(secondApp.lastFrame, (frame) => frame.includes("Continue with the saved lane"));
+        await delay(50);
+        secondApp.stdin.write("a");
+        await waitForFrame(secondApp.lastFrame, (frame) => frame.includes("Resumed okay"));
+
+        const calls = readInvocationLog(env.logPath);
+        expect(calls.some((call) => call.resumeId === `${provider}-persist-1`)).toBe(true);
+      } finally {
+        secondApp.unmount();
+      }
+    } finally {
+      env.restore();
+    }
+  }, 15000);
 });
 
 function createMockEnv(calls: Array<Record<string, unknown>>): MockEnv {

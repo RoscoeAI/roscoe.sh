@@ -244,7 +244,7 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
     dispatch({ type: "SET_AUTO_MODE", enabled: autoEnabled });
 
     for (const spec of pendingSpecs) {
-      const managed = service.startSession(spec);
+      const { managed, restoredState } = service.startSession(spec);
       dispatch({
         type: "ADD_SESSION",
         session: {
@@ -253,12 +253,12 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
           projectName: managed.projectName,
           worktreeName: managed.worktreeName,
           status: "active",
-          outputLines: [],
+          outputLines: restoredState?.outputLines ?? [],
           suggestion: { kind: "idle" },
           managed,
-          summary: null,
-          currentToolUse: null,
-          timeline: [],
+          summary: restoredState?.summary ?? null,
+          currentToolUse: restoredState?.currentToolUse ?? null,
+          timeline: restoredState?.timeline ?? [],
           viewMode: "transcript",
           scrollOffset: 0,
           followLive: true,

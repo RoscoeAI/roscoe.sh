@@ -143,6 +143,10 @@ export class SessionMonitor extends EventEmitter {
     return this.sessionId;
   }
 
+  restoreSessionId(sessionId: string | null): void {
+    this.sessionId = sessionId;
+  }
+
   getTextBuffer(): string {
     return this.textBuffer;
   }

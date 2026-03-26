@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx src/server/server.ts",
     "build": "vite build && tsc -p tsconfig.server.json",
-    "start": "node dist/server/server.js",
+    "start": "node dist/server/server/server.js",
     "test": "vitest run",
     "lint": "eslint src tests",
     "preview": "vite preview"

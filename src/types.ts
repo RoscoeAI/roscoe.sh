@@ -3,6 +3,7 @@ import { ConversationTracker } from "./conversation-tracker.js";
 import { SuggestionResult } from "./response-generator.js";
 import { HeadlessProfile, RuntimeControlSettings } from "./llm-runtime.js";
 import { OnboardingMode } from "./config.js";
+import type { Message } from "./conversation-tracker.js";
 
 // ── Session Types ──────────────────────────────────────────
 
@@ -36,6 +37,20 @@ export interface SessionStartOpts {
   worktreeName: string;
   projectName: string;
   runtimeOverrides?: RuntimeControlSettings;
+}
+
+export interface RestoredLaneState {
+  providerSessionId: string | null;
+  trackerHistory: Message[];
+  timeline: TranscriptEntry[];
+  outputLines: string[];
+  summary: string | null;
+  currentToolUse: string | null;
+}
+
+export interface SessionStartResult {
+  managed: ManagedSession;
+  restoredState: RestoredLaneState | null;
 }
 
 // ── Screen / State Types ───────────────────────────────────

@@ -8,7 +8,7 @@ export function useSessions(
 ) {
   const startSession = useCallback(
     (opts: SessionStartOpts) => {
-      const managed = service.startSession(opts);
+      const { managed, restoredState } = service.startSession(opts);
       dispatch({
         type: "ADD_SESSION",
         session: {
@@ -17,12 +17,12 @@ export function useSessions(
           projectName: managed.projectName,
           worktreeName: managed.worktreeName,
           status: "active",
-          outputLines: [],
+          outputLines: restoredState?.outputLines ?? [],
           suggestion: { kind: "idle" },
           managed,
-          summary: null,
-          currentToolUse: null,
-          timeline: [],
+          summary: restoredState?.summary ?? null,
+          currentToolUse: restoredState?.currentToolUse ?? null,
+          timeline: restoredState?.timeline ?? [],
           viewMode: "transcript",
           scrollOffset: 0,
           followLive: true,

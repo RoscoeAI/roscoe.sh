@@ -72,6 +72,12 @@ export function SessionView({ startSpecs, startRuntimeOverrides }: SessionViewPr
     sessionsRef.current = state.sessions;
   }, [state.sessions]);
 
+  useEffect(() => {
+    for (const session of state.sessions.values()) {
+      service.persistSessionState(session);
+    }
+  }, [service, state.sessions]);
+
   // Wire up event bridge
   useEventBridge(state.sessions, dispatch, service, state.autoMode);
 

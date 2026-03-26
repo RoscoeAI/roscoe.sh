@@ -278,11 +278,16 @@ export function useEventBridge(
         thinkingText += chunk;
       };
 
+      const onResult = () => {
+        dispatch({ type: "SYNC_MANAGED_SESSION", id, managed });
+      };
+
       monitor.on("text", onText);
       monitor.on("thinking", onThinking);
       monitor.on("turn-complete", onTurnComplete);
       monitor.on("exit", onExit);
       monitor.on("tool-activity", onToolActivity);
+      monitor.on("result", onResult);
 
       // Auto-start: spawn the configured headless LLM with an initial prompt.
       if (!monitor.getSessionId()) {
@@ -293,6 +298,19 @@ export function useEventBridge(
         managed.tracker.recordUserInput(initialPrompt);
         monitor.startTurn(initialPrompt);
         managed.awaitingInput = false;
+      } else if (managed.awaitingInput && managed.tracker.getContextForGeneration().trim()) {
+        dispatch({ type: "START_GENERATING", id });
+        void service.generateSuggestion(managed, createPartialDispatcher(dispatch, id))
+          .then((result) => {
+            dispatch({ type: "SUGGESTION_READY", id, result });
+          })
+          .catch((err) => {
+            dispatch({
+              type: "SUGGESTION_ERROR",
+              id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
       }
     }
 

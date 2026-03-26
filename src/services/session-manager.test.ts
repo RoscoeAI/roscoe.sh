@@ -14,7 +14,10 @@ const { mockStartOneShotRun } = vi.hoisted(() => ({
 class MockSessionMonitor extends EventEmitter {
   startTurn = vi.fn();
   sendFollowUp = vi.fn();
-  getSessionId = vi.fn(() => null);
+  getSessionId = vi.fn<() => string | null>(() => null);
+  restoreSessionId = vi.fn(function(this: MockSessionMonitor, sessionId: string | null) {
+    this.getSessionId = vi.fn(() => sessionId);
+  });
   kill = vi.fn();
   setProfile = vi.fn();
   id: string;
@@ -28,6 +31,8 @@ class MockSessionMonitor extends EventEmitter {
 vi.mock("../config.js", () => ({
   loadProfile: vi.fn(() => ({ name: "test", command: "claude", args: [] })),
   loadProjectContext: vi.fn(() => null),
+  loadLaneSession: vi.fn(() => null),
+  saveLaneSession: vi.fn(),
 }));
 vi.mock("../session-monitor.js", () => ({
   SessionMonitor: vi.fn().mockImplementation(function(id: string) {
@@ -44,7 +49,7 @@ vi.mock("../llm-runtime.js", async (importOriginal) => {
 
 import { expandTilde, parseSessionSpec, SessionManagerService } from "./session-manager.js";
 import { SessionMonitor } from "../session-monitor.js";
-import { loadProfile, loadProjectContext } from "../config.js";
+import { loadProfile, loadProjectContext, loadLaneSession, saveLaneSession } from "../config.js";
 import { startOneShotRun } from "../llm-runtime.js";
 
 // ── Pure helpers ────────────────────────────────────────────
@@ -120,6 +125,7 @@ describe("SessionManagerService", () => {
     // Re-apply mock implementations after mockReset
     vi.mocked(loadProfile).mockReturnValue({ name: "test", command: "claude", args: [] });
     vi.mocked(loadProjectContext).mockReturnValue(null);
+    vi.mocked(loadLaneSession).mockReturnValue(null);
     vi.mocked(SessionMonitor).mockImplementation(function(id: string) {
       return new MockSessionMonitor(id) as any;
     });
@@ -132,7 +138,7 @@ describe("SessionManagerService", () => {
 
   describe("startSession", () => {
     it("creates a managed session with correct id format", () => {
-      const managed = svc.startSession({
+      const { managed } = svc.startSession({
         profileName: "claude-code",
         projectDir: "/tmp/proj",
         worktreePath: "/tmp/proj",
@@ -218,7 +224,7 @@ describe("SessionManagerService", () => {
         },
       });
 
-      const managed = svc.startSession({
+      const { managed } = svc.startSession({
         profileName: "claude-code",
         projectDir: "/tmp/proj",
         worktreePath: "/tmp/proj",
@@ -233,7 +239,7 @@ describe("SessionManagerService", () => {
 
   describe("generateSummary", () => {
     it("returns summary from the shared one-shot runner", async () => {
-      const managed = svc.startSession({
+      const { managed } = svc.startSession({
         profileName: "test",
         projectDir: "/tmp",
         worktreePath: "/tmp",
@@ -251,7 +257,7 @@ describe("SessionManagerService", () => {
         proc: {} as any,
         result: Promise.reject(new Error("fail")),
       }));
-      const managed = svc.startSession({
+      const { managed } = svc.startSession({
         profileName: "test",
         projectDir: "/tmp",
         worktreePath: "/tmp",
@@ -265,7 +271,7 @@ describe("SessionManagerService", () => {
 
   describe("injectText", () => {
     it("records user input and sets awaitingInput to false", () => {
-      const managed = svc.startSession({
+      const { managed } = svc.startSession({
         profileName: "test",
         projectDir: "/tmp",
         worktreePath: "/tmp",
@@ -281,7 +287,7 @@ describe("SessionManagerService", () => {
 
   describe("executeSuggestion", () => {
     it("injects a suggestion only once while awaiting input", async () => {
-      const managed = svc.startSession({
+      const { managed } = svc.startSession({
         profileName: "test",
         projectDir: "/tmp",
         worktreePath: "/tmp",
@@ -305,6 +311,74 @@ describe("SessionManagerService", () => {
       expect(managed.monitor.sendFollowUp).toHaveBeenCalledTimes(1);
       expect(managed.monitor.sendFollowUp).toHaveBeenCalledWith("continue");
       expect(managed.awaitingInput).toBe(false);
+    });
+  });
+
+  describe("lane persistence", () => {
+    it("restores tracker history and provider session id from saved lane state", () => {
+      vi.mocked(loadLaneSession).mockReturnValue({
+        laneKey: "lane",
+        projectDir: "/tmp/proj",
+        projectName: "proj",
+        worktreePath: "/tmp/proj",
+        worktreeName: "main",
+        profileName: "claude-code",
+        protocol: "claude",
+        providerSessionId: "sess-123",
+        trackerHistory: [{ role: "assistant", content: "Previous reply", timestamp: 1 }],
+        timeline: [],
+        outputLines: ["Previous reply"],
+        summary: "Old summary",
+        currentToolUse: null,
+        savedAt: "2026-03-26T00:00:00.000Z",
+      } as any);
+
+      const { managed, restoredState } = svc.startSession({
+        profileName: "claude-code",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj",
+        worktreeName: "main",
+        projectName: "proj",
+      });
+
+      expect(managed.tracker.getHistory()[0]?.content).toBe("Previous reply");
+      expect(managed.monitor.getSessionId()).toBe("sess-123");
+      expect(restoredState?.summary).toBe("Old summary");
+    });
+
+    it("persists session snapshots for relaunch continuity", () => {
+      const { managed } = svc.startSession({
+        profileName: "claude-code",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj",
+        worktreeName: "main",
+        projectName: "proj",
+      });
+      managed.tracker.recordUserInput("Continue from here");
+      managed.monitor.getSessionId = vi.fn(() => "sess-456");
+
+      svc.persistSessionState({
+        id: managed.id,
+        profileName: managed.profileName,
+        projectName: managed.projectName,
+        worktreeName: managed.worktreeName,
+        status: "waiting",
+        outputLines: ["line"],
+        suggestion: { kind: "idle" },
+        managed,
+        summary: "Summary",
+        currentToolUse: "Read",
+        timeline: [],
+        viewMode: "transcript",
+        scrollOffset: 0,
+        followLive: true,
+      });
+
+      expect(saveLaneSession).toHaveBeenCalledWith(expect.objectContaining({
+        providerSessionId: "sess-456",
+        summary: "Summary",
+        currentToolUse: "Read",
+      }));
     });
   });
 });

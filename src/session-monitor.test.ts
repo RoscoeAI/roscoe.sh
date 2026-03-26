@@ -200,6 +200,11 @@ describe("SessionMonitor", () => {
       expect(monitor.getSessionId()).toBeNull();
     });
 
+    it("restoreSessionId seeds resume state for a relaunched lane", () => {
+      monitor.restoreSessionId("sess-restored");
+      expect(monitor.getSessionId()).toBe("sess-restored");
+    });
+
     it("getTextBuffer accumulates text", () => {
       monitor.startTurn("test");
       const line1 = JSON.stringify({

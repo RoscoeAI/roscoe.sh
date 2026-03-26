@@ -1,6 +1,6 @@
 import { resolve } from "path";
 import { homedir } from "os";
-import { loadProfile, loadProjectContext } from "../config.js";
+import { loadLaneSession, loadProfile, loadProjectContext, saveLaneSession } from "../config.js";
 import { SessionMonitor } from "../session-monitor.js";
 import { ConversationTracker } from "../conversation-tracker.js";
 import {
@@ -13,7 +13,7 @@ import {
 import { InputInjector } from "../input-injector.js";
 import { BrowserAgent } from "../browser-agent.js";
 import { Orchestrator } from "../orchestrator.js";
-import { ManagedSession, SessionStartOpts, ParsedSessionSpec } from "../types.js";
+import { ManagedSession, SessionStartOpts, ParsedSessionSpec, SessionStartResult, SessionState } from "../types.js";
 import { detectProtocol, startOneShotRun, summarizeRuntime, RuntimeControlSettings } from "../llm-runtime.js";
 import { NotificationService } from "../notification-service.js";
 import {
@@ -38,7 +38,7 @@ export class SessionManagerService {
     this.notifications = new NotificationService();
   }
 
-  startSession(opts: SessionStartOpts): ManagedSession {
+  startSession(opts: SessionStartOpts): SessionStartResult {
     const { profileName, projectDir, worktreePath, worktreeName, projectName, runtimeOverrides } = opts;
     const projectContext = loadProjectContext(projectDir);
     const requestedProfile = loadProfile(profileName);
@@ -60,6 +60,13 @@ export class SessionManagerService {
       worktreePath,
     );
     const tracker = new ConversationTracker();
+    const restoredLane = loadLaneSession(projectDir, worktreePath, worktreeName, effectiveProfileName);
+    if (restoredLane?.trackerHistory?.length) {
+      tracker.restoreHistory(restoredLane.trackerHistory);
+    }
+    if (restoredLane?.providerSessionId) {
+      monitor.restoreSessionId(restoredLane.providerSessionId);
+    }
 
     const managed: ManagedSession = {
       id,
@@ -90,7 +97,19 @@ export class SessionManagerService {
       this.orchestrator.registerWorker(id, monitor, effectiveProfileName);
     }
 
-    return managed;
+    return {
+      managed,
+      restoredState: restoredLane
+        ? {
+            providerSessionId: restoredLane.providerSessionId,
+            trackerHistory: restoredLane.trackerHistory,
+            timeline: restoredLane.timeline,
+            outputLines: restoredLane.outputLines,
+            summary: restoredLane.summary,
+            currentToolUse: restoredLane.currentToolUse,
+          }
+        : null,
+    };
   }
 
   async generateSuggestion(
@@ -200,6 +219,26 @@ export class SessionManagerService {
       ? "Pinned to the configured model and reasoning effort within the locked provider."
       : "Roscoe can retune model and reasoning within the locked provider before the next Guild turn.";
     return managed;
+  }
+
+  persistSessionState(session: SessionState): void {
+    const managed = session.managed;
+    saveLaneSession({
+      laneKey: "",
+      projectDir: managed.projectDir,
+      projectName: managed.projectName,
+      worktreePath: managed.worktreePath,
+      worktreeName: managed.worktreeName,
+      profileName: managed.profileName,
+      protocol: detectProtocol(managed.profile),
+      providerSessionId: managed.monitor.getSessionId(),
+      trackerHistory: managed.tracker.getHistory(),
+      timeline: session.timeline,
+      outputLines: session.outputLines,
+      summary: session.summary,
+      currentToolUse: session.currentToolUse,
+      savedAt: new Date().toISOString(),
+    });
   }
 
   prepareWorkerTurn(
