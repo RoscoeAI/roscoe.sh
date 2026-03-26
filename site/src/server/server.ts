@@ -1,4 +1,3 @@
-import { createServer as createViteServer } from "vite";
 import { resolve } from "path";
 import { readFile } from "fs/promises";
 import { createSiteApp } from "./app.js";
@@ -15,6 +14,7 @@ async function start() {
   });
 
   if (!isProduction) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       appType: "spa",
       server: { middlewareMode: true },
