@@ -160,6 +160,9 @@ const BRIEF_SCHEMA_EXAMPLE = `{
   }
 }`;
 
+const BRIEF_SCHEMA_REFERENCE = `Use the same JSON schema shape established in the initial brief contract block.
+Keep top-level keys and required structure unchanged. Fill with repo-grounded values and concise prose.`;
+
 const ONBOARDING_PROMPT = `You are Roscoe's onboarding strategist for a new project.
 
 Your job is to train Roscoe with the exact intent, definition of done, autonomy rules, and quality bar that should govern future Guild sessions.
@@ -247,9 +250,7 @@ Rules:
 
 For the final brief, end your response with:
 
----BRIEF---
-${BRIEF_SCHEMA_EXAMPLE}
----END_BRIEF---`;
+${BRIEF_SCHEMA_REFERENCE}`;
 
 const FOLLOWUP_PROMPT = `Continue Roscoe's codebase-grounded intent interview.
 
@@ -270,9 +271,7 @@ Rules:
 
 For the final brief, end your response with:
 
----BRIEF---
-${BRIEF_SCHEMA_EXAMPLE}
----END_BRIEF---`;
+${BRIEF_SCHEMA_REFERENCE}`;
 
 const REFINE_PROMPT = `You are Roscoe's refinement strategist for an already onboarded project.
 
@@ -317,9 +316,7 @@ Rules:
 
 For the final brief, end your response with:
 
----BRIEF---
-${BRIEF_SCHEMA_EXAMPLE}
----END_BRIEF---`;
+${BRIEF_SCHEMA_REFERENCE}`;
 
 const MIN_INTERVIEW_QUESTIONS = 8;
 const MIN_DONE_VETTING_QUESTIONS = 2;
