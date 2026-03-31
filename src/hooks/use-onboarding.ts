@@ -54,17 +54,37 @@ export function parseSecretRequest(text: string): ProjectSecretRequest | null {
 
 /** Parse structured question block from Claude's response */
 export function parseQuestion(text: string): InterviewQuestion | null {
-  const match = text.match(/---QUESTION---\s*\n?([\s\S]*?)\n?---END_QUESTION---/);
+  const match = text.match(/-{3,}QUESTION-{3,}\s*\n?([\s\S]*?)\n?-{3,}END(?:_QUESTION)?-{3,}/);
   if (!match) return null;
   try {
     const parsed = JSON.parse(match[1].trim());
-    if (parsed.question && Array.isArray(parsed.options)) {
+    const question = typeof parsed.question === "string"
+      ? parsed.question
+      : typeof parsed.stem === "string"
+        ? parsed.stem
+        : null;
+    const options = Array.isArray(parsed.options)
+      ? parsed.options
+      : Array.isArray(parsed.choices)
+        ? parsed.choices
+          .map((choice: unknown) => {
+            if (typeof choice === "string") return choice;
+            if (!choice || typeof choice !== "object") return null;
+            const typedChoice = choice as Record<string, unknown>;
+            return typeof typedChoice.text === "string" ? typedChoice.text : null;
+          })
+          .filter((option: unknown): option is string => typeof option === "string" && option.trim().length > 0)
+        : null;
+    if (question && Array.isArray(options)) {
       return {
-        text: parsed.question,
-        options: parsed.options,
+        text: question,
+        options,
         ...(typeof parsed.theme === "string" ? { theme: parsed.theme } : {}),
         ...(typeof parsed.purpose === "string" ? { purpose: parsed.purpose } : {}),
-        selectionMode: parsed.selectionMode === "multi" ? "multi" : "single",
+        selectionMode:
+          parsed.selectionMode === "multi" || (typeof parsed.max_selections === "number" && parsed.max_selections > 1)
+            ? "multi"
+            : "single",
       };
     }
   } catch {
@@ -77,7 +97,7 @@ export function parseQuestion(text: string): InterviewQuestion | null {
 export function cleanStreamingText(text: string): string {
   return cleanSecretBlocks(
     text
-      .replace(/---QUESTION---[\s\S]*?---END_QUESTION---/g, "")
+      .replace(/-{3,}QUESTION-{3,}[\s\S]*?-{3,}END(?:_QUESTION)?-{3,}/g, "")
       .replace(/---BRIEF---[\s\S]*?---END_BRIEF---/g, ""),
   ).trim();
 }

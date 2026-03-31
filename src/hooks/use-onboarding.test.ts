@@ -38,11 +38,38 @@ describe("parseQuestion", () => {
 ---END_QUESTION---`;
     expect(parseQuestion(text)?.selectionMode).toBe("single");
   });
+
+  it("parses legacy question payloads with stem and choices", () => {
+    const text = `---QUESTION---
+{"id":"Q20","theme":"coverage-mechanism","stem":"Which proof chain marks this front as done?","choices":[{"key":"A","text":"CI gate"},{"key":"B","text":"Integration gate"}],"max_selections":2}
+---END_QUESTION---`;
+
+    const result = parseQuestion(text);
+    expect(result).not.toBeNull();
+    expect(result!.text).toBe("Which proof chain marks this front as done?");
+    expect(result!.options).toEqual(["CI gate", "Integration gate"]);
+    expect(result!.selectionMode).toBe("multi");
+  });
+
+  it("parses question blocks with extra dash delimiters", () => {
+    const text = `----QUESTION----
+{"question":"Which users matter most?","options":["Operators","Admins"]}
+----END_QUESTION----`;
+
+    const result = parseQuestion(text);
+    expect(result).not.toBeNull();
+    expect(result!.text).toBe("Which users matter most?");
+  });
 });
 
 describe("cleanStreamingText", () => {
   it("removes QUESTION blocks", () => {
     const text = 'Analysis here\n---QUESTION---\n{"question":"q","options":["a"]}\n---END_QUESTION---';
+    expect(cleanStreamingText(text)).toBe("Analysis here");
+  });
+
+  it("removes legacy question blocks with flexible dashes", () => {
+    const text = 'Analysis here\n----QUESTION----\n{"stem":"q","choices":[{"key":"A","text":"a"}]}\n----END----';
     expect(cleanStreamingText(text)).toBe("Analysis here");
   });
 
