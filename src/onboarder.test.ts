@@ -1,12 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "events";
-import { writeFileSync } from "fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} from "fs";
 
 // Create a class that properly extends EventEmitter for the mock
 class MockSessionMonitor extends EventEmitter {
   startTurn = vi.fn();
   sendFollowUp = vi.fn();
   setProfile = vi.fn();
+  restoreSessionId = vi.fn();
   getSessionId = vi.fn(() => "sess-1");
   kill = vi.fn();
   id: string;
@@ -93,6 +98,8 @@ vi.mock("./debug-log.js", () => ({
 vi.mock("fs", () => ({
   mkdirSync: vi.fn(),
   writeFileSync: vi.fn(),
+  readFileSync: vi.fn(() => ""),
+  rmSync: vi.fn(),
   existsSync: vi.fn(() => false),
   readdirSync: vi.fn(() => []),
   statSync: vi.fn(() => ({ isDirectory: () => true })),
@@ -226,6 +233,8 @@ describe("Onboarder", () => {
       mockMonitorInstance = new MockSessionMonitor(id);
       return mockMonitorInstance as any;
     });
+    vi.mocked(existsSync).mockImplementation(() => false);
+    vi.mocked(readFileSync).mockReturnValue("");
     onboarder = new Onboarder("/tmp/test-project");
   });
 
@@ -248,6 +257,58 @@ describe("Onboarder", () => {
     it("returns the session via getSession", () => {
       onboarder.start();
       expect(onboarder.getSession()).toBeTruthy();
+    });
+
+    it("resumes from a saved onboarding checkpoint when available", () => {
+      vi.mocked(existsSync).mockImplementation((path) => String(path).includes("onboarding-checkpoint.json"));
+      vi.mocked(readFileSync).mockReturnValueOnce(
+        JSON.stringify({
+          version: 1,
+          mode: "onboard",
+          protocol: "claude",
+          profileName: "orchestrator",
+          projectDir: "/tmp/test-project",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          sessionId: "ckpt-session-1",
+          workspaceMode: "existing",
+          questionHistory: [{
+            question: "What is the project story?",
+            options: ["A", "B"],
+            theme: "project-story",
+          }],
+          interviewAnswers: [{
+            question: "What is the project story?",
+            answer: "A focused operator workflow.",
+            theme: "project-story",
+          }],
+          sessionInterviewAnswers: [{
+            question: "What is the project story?",
+            answer: "A focused operator workflow.",
+            theme: "project-story",
+          }],
+          rawTranscript: "A checkpoint transcript",
+          outputBuffer: "Interrupted output",
+          completed: false,
+        }),
+      );
+
+      onboarder.start();
+
+      expect(mockMonitorInstance.restoreSessionId).toHaveBeenCalledWith("ckpt-session-1");
+      expect(mockMonitorInstance.startTurn).toHaveBeenCalledWith(
+        expect.stringContaining("previous onboarding turn was interrupted"),
+      );
+      expect(mockMonitorInstance.startTurn).not.toHaveBeenCalledWith(
+        expect.stringContaining("vision-first build from an empty or scaffold-only workspace"),
+      );
+    });
+
+    it("persists checkpoint state on answer submit", () => {
+      onboarder.start();
+      vi.mocked(writeFileSync).mockClear();
+      onboarder.sendInput("Option A", { question: "Priority?", theme: "definition-of-done" });
+      expect(vi.mocked(writeFileSync)).toHaveBeenCalled();
     });
   });
 

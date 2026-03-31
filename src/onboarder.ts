@@ -1,5 +1,5 @@
-import { mkdirSync } from "fs";
-import { resolve } from "path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { join, resolve } from "path";
 import { SessionMonitor } from "./session-monitor.js";
 import {
   InterviewAnswer,
@@ -27,6 +27,70 @@ import {
   writeProjectSecretValue,
 } from "./project-secrets.js";
 import { inferDeploymentAssessment } from "./deployment-contract.js";
+
+const ONBOARDING_CHECKPOINT_VERSION = 1;
+const ONBOARDING_CHECKPOINT_FILE = "onboarding-checkpoint.json";
+
+interface OnboardingCheckpoint {
+  version: number;
+  mode: OnboardingMode;
+  protocol: "claude" | "codex" | "gemini";
+  profileName: string;
+  projectDir: string;
+  createdAt: string;
+  updatedAt: string;
+  sessionId: string | null;
+  workspaceMode: string;
+  questionHistory: InterviewQuestionRecord[];
+  interviewAnswers: InterviewAnswer[];
+  sessionInterviewAnswers: InterviewAnswer[];
+  rawTranscript: string;
+  outputBuffer: string;
+  completed: boolean;
+}
+
+function getOnboardingCheckpointPath(projectDir: string): string {
+  return join(projectDir, ".roscoe", ONBOARDING_CHECKPOINT_FILE);
+}
+
+function pruneForCheckpoint(text: string, maxLength = 20000): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+  return `${trimmed.slice(-maxLength)}`;
+}
+
+function parseCheckpoint(raw: unknown): OnboardingCheckpoint | null {
+  if (!raw || typeof raw !== "object") return null;
+  const typed = raw as Record<string, unknown>;
+  if (typed.version !== ONBOARDING_CHECKPOINT_VERSION) return null;
+
+  const protocol = typed.protocol;
+  if (protocol !== "claude" && protocol !== "codex" && protocol !== "gemini") return null;
+  if (typed.mode !== "onboard" && typed.mode !== "refine") return null;
+  if (typeof typed.profileName !== "string") return null;
+  if (typeof typed.projectDir !== "string") return null;
+  if (!Array.isArray(typed.questionHistory)) return null;
+  if (!Array.isArray(typed.interviewAnswers)) return null;
+  if (!Array.isArray(typed.sessionInterviewAnswers)) return null;
+
+  return {
+    version: ONBOARDING_CHECKPOINT_VERSION,
+    mode: typed.mode,
+    protocol,
+    profileName: typed.profileName,
+    projectDir: typed.projectDir,
+    createdAt: typeof typed.createdAt === "string" ? typed.createdAt : new Date(0).toISOString(),
+    updatedAt: typeof typed.updatedAt === "string" ? typed.updatedAt : new Date(0).toISOString(),
+    sessionId: typeof typed.sessionId === "string" ? typed.sessionId : null,
+    workspaceMode: typeof typed.workspaceMode === "string" ? typed.workspaceMode : "unknown",
+    questionHistory: typed.questionHistory as InterviewQuestionRecord[],
+    interviewAnswers: typed.interviewAnswers as InterviewAnswer[],
+    sessionInterviewAnswers: typed.sessionInterviewAnswers as InterviewAnswer[],
+    rawTranscript: typeof typed.rawTranscript === "string" ? typed.rawTranscript : "",
+    outputBuffer: typeof typed.outputBuffer === "string" ? typed.outputBuffer : "",
+    completed: typed.completed === true,
+  };
+}
 
 const BRIEF_SCHEMA_EXAMPLE = `{
   "name": "project name",
@@ -473,6 +537,7 @@ export class Onboarder extends EventEmitter {
   private sessionInterviewAnswers: InterviewAnswer[] = [];
   private questionHistory: InterviewQuestionRecord[] = [];
   private rawTranscript = "";
+  private onboardingCheckpoint: OnboardingCheckpoint | null = null;
   private mode: OnboardingMode;
   private refineThemes: string[];
   private seedContext: ProjectContext | null;
@@ -509,12 +574,25 @@ export class Onboarder extends EventEmitter {
     dbg("onboard", `start dir=${dir}`);
     mkdirSync(dir, { recursive: true });
     this.workspaceAssessment = inspectWorkspaceForOnboarding(dir);
+    this.outputBuffer = "";
+    this.rawTranscript = "";
     this.interviewAnswers = this.mode === "refine"
       ? [...(this.seedContext?.interviewAnswers ?? [])]
       : [];
-    this.sessionInterviewAnswers = [];
     this.questionHistory = [];
-    this.rawTranscript = "";
+    this.sessionInterviewAnswers = this.mode === "refine"
+      ? [...(this.seedContext?.interviewAnswers ?? [])].filter(Boolean)
+      : [];
+
+    this.onboardingCheckpoint = this.loadCheckpoint();
+    if (this.shouldResumeFromCheckpoint()) {
+      this.interviewAnswers = this.onboardingCheckpoint.interviewAnswers;
+      this.questionHistory = this.onboardingCheckpoint.questionHistory;
+      this.sessionInterviewAnswers = this.onboardingCheckpoint.sessionInterviewAnswers;
+      this.rawTranscript = this.onboardingCheckpoint.rawTranscript;
+      this.outputBuffer = "";
+      this.rawTranscript = pruneForCheckpoint(this.rawTranscript, 20000);
+    }
     this.completed = false;
 
     this.profile = applyProjectEnvToProfile(this.profile, dir);
@@ -524,8 +602,105 @@ export class Onboarder extends EventEmitter {
       dir,
     );
 
+    if (this.mode === "onboard" && this.onboardingCheckpoint?.sessionId) {
+      this.session.restoreSessionId(this.onboardingCheckpoint.sessionId);
+    }
+
     this.wireEvents();
+
+    if (this.shouldResumeFromCheckpoint()) {
+      this.session.startTurn(this.buildResumePrompt());
+      return;
+    }
+
     this.session.startTurn(this.buildStartPrompt());
+  }
+
+  private shouldResumeFromCheckpoint(): boolean {
+    if (!this.onboardingCheckpoint) return false;
+    if (this.onboardingCheckpoint.completed) return false;
+    if (!this.onboardingCheckpoint.sessionId) return false;
+    if (this.mode !== this.onboardingCheckpoint.mode) return false;
+    if (this.onboardingCheckpoint.protocol !== detectProtocol(this.profile)) return false;
+    if (this.onboardingCheckpoint.profileName && this.onboardingCheckpoint.profileName !== this.profile.name) return false;
+    return true;
+  }
+
+  private buildResumePrompt(): string {
+    const lastQuestion = this.questionHistory.at(-1);
+    const interviewContext = this.interviewAnswers.length === 0
+      ? "No interview answers were saved yet."
+      : formatInterviewAnswersForPrompt(this.interviewAnswers);
+
+    return `The previous onboarding turn was interrupted and Roscoe should continue from the same session.
+
+RESUME_CONTEXT:
+- Last asked question: ${lastQuestion?.question ?? "(none yet)"}
+- Saved interview answers:
+${interviewContext}
+
+WORKSPACE_ASSESSMENT:
+${this.workspaceAssessment.summary}
+
+Continue this onboarding interview from where it left off. Do not start over.
+Ask the next highest-value question, or complete the brief if everything is ready.
+- Keep question format: ---QUESTION--- ... ---END_QUESTION---.
+- Respect the prior theme coverage and interview progress.`;
+  }
+
+  private checkpointPath(): string {
+    return getOnboardingCheckpointPath(this.projectDir);
+  }
+
+  private loadCheckpoint(): OnboardingCheckpoint | null {
+    const checkpointPath = this.checkpointPath();
+    if (!existsSync(checkpointPath)) return null;
+    try {
+      const parsed = JSON.parse(readFileSync(checkpointPath, "utf-8")) as unknown;
+      const checkpoint = parseCheckpoint(parsed);
+      if (!checkpoint) return null;
+      if (checkpoint.projectDir !== this.projectDir) return null;
+      return checkpoint;
+    } catch {
+      return null;
+    }
+  }
+
+  private saveCheckpoint(completed = false): void {
+    if (this.mode !== "onboard") return;
+    const checkpointPath = this.checkpointPath();
+    if (!existsSync(resolve(this.projectDir, ".roscoe"))) {
+      mkdirSync(resolve(this.projectDir, ".roscoe"), { recursive: true });
+    }
+
+    const now = new Date().toISOString();
+    const checkpoint: OnboardingCheckpoint = {
+      version: ONBOARDING_CHECKPOINT_VERSION,
+      mode: this.mode,
+      protocol: detectProtocol(this.profile),
+      profileName: this.profile.name,
+      projectDir: this.projectDir,
+      createdAt: this.onboardingCheckpoint?.createdAt ?? now,
+      updatedAt: now,
+      sessionId: this.session?.getSessionId() ?? null,
+      workspaceMode: this.workspaceAssessment.mode,
+      questionHistory: [...this.questionHistory],
+      interviewAnswers: [...this.interviewAnswers],
+      sessionInterviewAnswers: [...this.sessionInterviewAnswers],
+      rawTranscript: pruneForCheckpoint(this.rawTranscript, 24000),
+      outputBuffer: pruneForCheckpoint(this.outputBuffer, 8000),
+      completed,
+    };
+
+    writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
+  }
+
+  private clearCheckpoint(): void {
+    const checkpointPath = this.checkpointPath();
+    if (existsSync(checkpointPath)) {
+      rmSync(checkpointPath, { force: true });
+    }
+    this.onboardingCheckpoint = null;
   }
 
   private wireEvents(): void {
@@ -537,6 +712,10 @@ export class Onboarder extends EventEmitter {
       this.emit("output", chunk);
     });
 
+    this.session.on("result", () => {
+      this.saveCheckpoint();
+    });
+
     this.session.on("turn-complete", () => {
       dbg("onboard", `turn-complete (buffer: ${this.outputBuffer.length} chars)`);
       const question = extractQuestionRecord(this.outputBuffer);
@@ -544,6 +723,9 @@ export class Onboarder extends EventEmitter {
         this.questionHistory.push(question);
       }
       const briefState = this.checkForProjectBrief();
+      if (briefState !== "completed") {
+        this.saveCheckpoint();
+      }
       if (briefState === "none") {
         this.emit("turn-complete");
       }
@@ -600,6 +782,7 @@ export class Onboarder extends EventEmitter {
       this.sessionInterviewAnswers.push(answerRecord);
     }
     this.rawTranscript += `\n[user] ${text}\n`;
+    this.saveCheckpoint();
     const prompt = this.buildFollowUpPrompt(
       question?.question ?? "Unknown question",
       text,
@@ -634,6 +817,7 @@ export class Onboarder extends EventEmitter {
     this.rawTranscript += action === "provided"
       ? `\n[secret] ${request.key} provided securely (${request.targetFile})\n`
       : `\n[secret] ${request.key} skipped\n`;
+    this.saveCheckpoint();
 
     const answer = action === "provided"
       ? `The user securely provided ${request.key}. Roscoe saved it to ${request.targetFile}. Treat this secret as available now.`
@@ -700,6 +884,7 @@ export class Onboarder extends EventEmitter {
         });
         registerProject(brief.name, brief.directory);
         this.completed = true;
+        this.clearCheckpoint();
         this.emit("onboarding-complete", brief);
         return "completed";
       } catch {
