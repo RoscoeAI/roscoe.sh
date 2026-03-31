@@ -1,14 +1,16 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const mockExecFile = vi.fn();
+const mockExecFile = vi.fn<(cmd: string, args: string[], opts: unknown, cb: Function) => void>();
+const mockExistsSync = vi.fn<(path: string) => boolean>(() => true);
+const mockMkdirSync = vi.fn<(path: string, options?: { recursive?: boolean }) => void>();
 
 vi.mock("child_process", () => ({
-  execFile: (...args: unknown[]) => mockExecFile(...args),
+  execFile: (...args: [string, string[], unknown, Function]) => mockExecFile(...args),
 }));
 
 vi.mock("fs", () => ({
-  existsSync: vi.fn(() => true),
-  mkdirSync: vi.fn(),
+  existsSync: (...args: [string]) => mockExistsSync(...args),
+  mkdirSync: (...args: [string, { recursive?: boolean }?]) => mockMkdirSync(...args),
 }));
 
 import { BrowserAgent } from "./browser-agent.js";
@@ -19,6 +21,13 @@ describe("BrowserAgent", () => {
   beforeEach(() => {
     agent = new BrowserAgent("test-session");
     mockExecFile.mockReset();
+    mockExistsSync.mockReset();
+    mockExistsSync.mockReturnValue(true);
+    mockMkdirSync.mockReset();
+  });
+
+  afterEach(() => {
+    delete process.env.TEST_PASSWORD;
   });
 
   function mockExecSuccess(stdout: string) {
@@ -46,6 +55,13 @@ describe("BrowserAgent", () => {
     it("uses provided session ID", () => {
       expect(agent.getSessionId()).toBe("test-session");
     });
+
+    it("creates the screenshot directory when it is missing", () => {
+      mockExistsSync.mockReturnValueOnce(false);
+      const missing = new BrowserAgent("missing-dir");
+      expect(missing.getScreenshotDir()).toContain("screenshots");
+      expect(mockMkdirSync).toHaveBeenCalledWith(expect.stringContaining("screenshots"), { recursive: true });
+    });
   });
 
   describe("open", () => {
@@ -65,6 +81,11 @@ describe("BrowserAgent", () => {
     it("rejects on error", async () => {
       mockExecError("connection refused");
       await expect(agent.open("https://bad.url")).rejects.toThrow("agent-browser open failed");
+    });
+
+    it("throws when agent-browser returns malformed JSON", async () => {
+      mockExecSuccess("not json");
+      await expect(agent.open("https://example.com")).rejects.toThrow("Failed to parse agent-browser output");
     });
   });
 
@@ -119,6 +140,37 @@ describe("BrowserAgent", () => {
     });
   });
 
+  describe("wrapper helpers", () => {
+    it("delegates click and fill through interact", async () => {
+      mockExecSuccess("ok");
+      const interactSpy = vi.spyOn(agent, "interact");
+
+      await agent.click("submit");
+      await agent.fill("email", "tim@example.com");
+
+      expect(interactSpy).toHaveBeenNthCalledWith(1, "click", "submit");
+      expect(interactSpy).toHaveBeenNthCalledWith(2, "fill", "email", "tim@example.com");
+    });
+
+    it("parses evaluate and getState responses", async () => {
+      mockExecFile.mockImplementation(
+        (_cmd: string, args: string[], _opts: unknown, cb: Function) => {
+          if (args[0] === "evaluate" && args[1] === "2 + 2") {
+            cb(null, JSON.stringify(4), "");
+            return;
+          }
+          cb(null, JSON.stringify({ url: "https://example.com", title: "Example" }), "");
+        },
+      );
+
+      await expect(agent.evaluate("2 + 2")).resolves.toBe(4);
+      await expect(agent.getState()).resolves.toMatchObject({
+        url: "https://example.com",
+        title: "Example",
+      });
+    });
+  });
+
   describe("login", () => {
     it("opens URL and executes auth steps", async () => {
       mockExecSuccess(JSON.stringify({ url: "https://app.com", title: "App" }));
@@ -152,7 +204,37 @@ describe("BrowserAgent", () => {
         expect.any(Object),
         expect.any(Function),
       );
-      delete process.env.TEST_PASSWORD;
+    });
+
+    it("handles navigate and wait steps, including the default wait duration", async () => {
+      vi.useFakeTimers();
+      mockExecSuccess(JSON.stringify({ url: "https://app.com", title: "App" }));
+      const openSpy = vi.spyOn(agent, "open");
+      const fillSpy = vi.spyOn(agent, "fill");
+      const clickSpy = vi.spyOn(agent, "click");
+
+      const promise = agent.login({
+        name: "branchy-auth",
+        url: "https://app.com",
+        steps: [
+          { action: "navigate", value: "https://app.com/login" },
+          { action: "fill", ref: "email", value: "person@example.com" },
+          { action: "fill", value: "ignored because ref is missing" },
+          { action: "click", ref: "submit" },
+          { action: "click" },
+          { action: "wait" },
+          { action: "wait", value: "250" },
+        ],
+      });
+
+      await vi.runAllTimersAsync();
+      await promise;
+
+      expect(openSpy).toHaveBeenNthCalledWith(1, "https://app.com");
+      expect(openSpy).toHaveBeenNthCalledWith(2, "https://app.com/login");
+      expect(fillSpy).toHaveBeenCalledTimes(1);
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
     });
   });
 
@@ -178,6 +260,32 @@ describe("BrowserAgent", () => {
       const summary = await agent.getContextSummary();
       expect(summary).toContain("Example");
       expect(summary).toContain("Click me");
+    });
+
+    it("falls back gracefully when state or snapshot reads fail", async () => {
+      vi.spyOn(agent, "getState").mockRejectedValueOnce(new Error("boom"));
+      vi.spyOn(agent, "snapshot").mockRejectedValueOnce(new Error("no snapshot"));
+
+      await expect(agent.getContextSummary()).resolves.toContain("Page: (could not read state)");
+    });
+
+    it("truncates long snapshot lists in the context summary", async () => {
+      vi.spyOn(agent, "getState").mockResolvedValueOnce({
+        url: "https://example.com",
+        title: "Example",
+      });
+      vi.spyOn(agent, "snapshot").mockResolvedValueOnce(
+        Array.from({ length: 22 }, (_, index) => ({
+          ref: `el-${index + 1}`,
+          role: "button",
+          name: `Button ${index + 1}`,
+        })),
+      );
+
+      const summary = await agent.getContextSummary();
+      expect(summary).toContain("Interactive elements:");
+      expect(summary).toContain("el-20 [button] Button 20");
+      expect(summary).toContain("... and 2 more");
     });
   });
 

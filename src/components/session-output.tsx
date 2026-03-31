@@ -1,10 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, measureElement } from "ink";
+import stringWidth from "string-width";
+import wrapAnsi from "wrap-ansi";
 import { SessionState, TranscriptEntry } from "../types.js";
 import { stripAnsi, wrapBlock, wrapLine } from "../text-layout.js";
 import { Panel, Pill } from "./chrome.js";
-import { summarizeRuntime } from "../llm-runtime.js";
-import { getRuntimeTuningMode } from "../runtime-defaults.js";
+import {
+  formatRoscoeDraftDisplayText,
+  normalizeLegacySidecarErrorText,
+  normalizeRoscoeDraftMessage,
+} from "../roscoe-draft.js";
+import { getToolActivityLiveText, getToolActivityNoteText } from "../session-activity.js";
+import { sortTranscriptEntries } from "../session-transcript.js";
+import { renderMd } from "../render-md.js";
 
 interface DisplayLine {
   id: string;
@@ -14,31 +22,28 @@ interface DisplayLine {
   dimColor?: boolean;
 }
 
+type BubbleSide = "left" | "right" | "center";
+
 interface SessionOutputProps {
   session: SessionState | null;
   sessionLabel?: string;
 }
 
-function formatGuildLabel(session: SessionState): string {
-  const lane = session.worktreeName === "main" ? session.projectName : session.worktreeName;
-  return `GUILD ${lane.toUpperCase()}`;
-}
-
-function confidenceColor(confidence?: number): string {
+export function confidenceColor(confidence?: number): string {
   if (typeof confidence !== "number") return "gray";
   if (confidence >= 80) return "green";
   if (confidence >= 60) return "yellow";
   return "red";
 }
 
-function deliveryColor(delivery: string): string {
+export function deliveryColor(delivery: string): string {
   if (delivery === "auto" || delivery === "approved") return "green";
   if (delivery === "edited") return "yellow";
   if (delivery === "manual") return "magenta";
   return "gray";
 }
 
-function addWrappedLines(
+export function addWrappedLines(
   target: DisplayLine[],
   idPrefix: string,
   text: string,
@@ -74,175 +79,317 @@ function addSpacer(target: DisplayLine[], id: string): void {
   target.push({ id, text: "" });
 }
 
-function buildTraceLines(session: SessionState, width: number): DisplayLine[] {
-  const lines: DisplayLine[] = [];
-  const guildLabel = formatGuildLabel(session);
-  const workerRuntime = session.managed.profile
-    ? summarizeRuntime(session.managed.profile)
-    : "worker";
-  const workerMode = getRuntimeTuningMode(session.managed.profile?.runtime);
-  const workerCommand = session.managed.monitor?.getLastCommandPreview?.() ?? null;
-  const workerPrompt = session.managed.monitor?.getLastPrompt?.() ?? null;
-  const workerStrategy = session.managed.lastWorkerRuntimeStrategy;
-  const workerRationale = session.managed.lastWorkerRuntimeRationale;
-  const responderCommand = session.managed.lastResponderCommand;
-  const responderPrompt = session.managed.lastResponderPrompt;
-  const responderRuntime = session.managed.lastResponderRuntimeSummary;
-  const responderStrategy = session.managed.lastResponderStrategy;
-  const responderRationale = session.managed.lastResponderRationale;
-  const responderMode = getRuntimeTuningMode(session.managed.profile?.runtime);
-
-  lines.push({
-    id: "trace-worker-label",
-    text: `${guildLabel} CLI`,
-    color: "yellow",
-    bold: true,
-  });
-  addWrappedLines(lines, "trace-worker-provider", `Provider: locked to ${session.managed.profile?.protocol ?? session.profileName}`, width, { dimColor: true }, "  ", 1);
-  addWrappedLines(lines, "trace-worker-runtime", `Runtime: ${workerRuntime}`, width, { dimColor: true }, "  ", 1);
-  addWrappedLines(lines, "trace-worker-mode", `Management: ${workerMode}`, width, { dimColor: true }, "  ", 1);
-  if (workerStrategy) {
-    addWrappedLines(lines, "trace-worker-strategy", `Tuning: ${workerStrategy}`, width, { dimColor: true }, "  ", 1);
+export function alignLine(text: string, width: number, side: BubbleSide): string {
+  const length = stripAnsi(text).length;
+  if (side === "right") {
+    return `${" ".repeat(Math.max(0, width - length))}${text}`;
   }
-  if (workerRationale) {
-    addWrappedLines(lines, "trace-worker-rationale", `Why: ${workerRationale}`, width, { dimColor: true }, "  ", 2);
+  if (side === "center") {
+    return `${" ".repeat(Math.max(0, Math.floor((width - length) / 2)))}${text}`;
   }
-  if (workerCommand) {
-    addWrappedLines(lines, "trace-worker-command", `Command: ${workerCommand}`, width, { color: "cyan" }, "  ", 1);
-  }
-  if (workerPrompt) {
-    addWrappedLines(lines, "trace-worker-prompt", `Prompt: ${workerPrompt}`, width, {}, "  ", 2);
-  } else {
-    addWrappedLines(lines, "trace-worker-idle", "Prompt: waiting for the first worker turn.", width, { dimColor: true }, "  ", 1);
-  }
-
-  addSpacer(lines, "trace-gap-1");
-
-  lines.push({
-    id: "trace-responder-label",
-    text: "ROSCOE CLI",
-    color: "magenta",
-    bold: true,
-  });
-  addWrappedLines(lines, "trace-responder-provider", `Provider: locked to ${session.managed.profile?.protocol ?? session.profileName}`, width, { dimColor: true }, "  ", 1);
-  if (responderRuntime) {
-    addWrappedLines(lines, "trace-responder-runtime", `Runtime: ${responderRuntime}`, width, { dimColor: true }, "  ", 1);
-  } else {
-    addWrappedLines(lines, "trace-responder-runtime-idle", "Runtime: waiting for the first responder pass.", width, { dimColor: true }, "  ", 1);
-  }
-  addWrappedLines(lines, "trace-responder-mode", `Management: ${responderMode}`, width, { dimColor: true }, "  ", 1);
-  if (responderStrategy) {
-    addWrappedLines(lines, "trace-responder-strategy", `Tuning: ${responderStrategy}`, width, { dimColor: true }, "  ", 1);
-  }
-  if (responderRationale) {
-    addWrappedLines(lines, "trace-responder-rationale", `Why: ${responderRationale}`, width, { dimColor: true }, "  ", 1);
-  }
-  if (responderCommand) {
-    addWrappedLines(lines, "trace-responder-command", `Command: ${responderCommand}`, width, { color: "magenta" }, "  ", 1);
-  }
-  if (responderPrompt) {
-    addWrappedLines(lines, "trace-responder-prompt", `Prompt: ${responderPrompt}`, width, {}, "  ", 2);
-  }
-
-  addSpacer(lines, "trace-gap-2");
-  lines.push({
-    id: "trace-divider",
-    text: "TRANSCRIPT",
-    color: "gray",
-    bold: true,
-  });
-
-  return lines;
+  return text;
 }
 
-function buildTranscriptLines(entries: TranscriptEntry[], width: number, session: SessionState): DisplayLine[] {
-  const lines: DisplayLine[] = [];
-  const guildLabel = formatGuildLabel(session);
+function displayWidth(text: string): number {
+  return stringWidth(stripAnsi(text));
+}
 
-  for (const entry of entries) {
-    if (entry.kind === "remote-turn") {
-      lines.push({
-        id: `${entry.id}-label`,
-        text: `${guildLabel} [${entry.provider}]${entry.activity ? ` [${entry.activity}]` : ""}`,
-        color: "cyan",
-        bold: true,
+function padDisplayLine(text: string, width: number): string {
+  return `${text}${" ".repeat(Math.max(0, width - displayWidth(text)))}`;
+}
+
+export function looksLikeMarkdown(text: string): boolean {
+  return /(^|\n)(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|~~~|\|.+\|)|\[[^\]]+\]\([^)]+\)|`[^`]+`|\*\*[^*]+\*\*/m.test(text);
+}
+
+export function prefersWideBubble(text: string): boolean {
+  return /(^|\n)(\|.+\||```|~~~| {4,}\S)/m.test(text);
+}
+
+export function wrapTranscriptBody(text: string, width: number): string[] {
+  const source = looksLikeMarkdown(text) ? renderMd(text) : text;
+  const lines: string[] = [];
+
+  for (const sourceLine of source.replace(/\r/g, "").split("\n")) {
+    if (sourceLine === "") {
+      lines.push("");
+      continue;
+    }
+
+    const wrapped = wrapAnsi(sourceLine, Math.max(12, width), {
+      hard: true,
+      trim: false,
+      wordWrap: false,
+    });
+    lines.push(...wrapped.split("\n"));
+  }
+
+  while (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines.length > 0 ? lines : [""];
+}
+
+function addBubble(
+  target: DisplayLine[],
+  {
+    idPrefix,
+    side,
+    speaker,
+    speakerColor,
+    body,
+    width,
+    bodyDim = false,
+    detail,
+    detailColor,
+    detailDim = true,
+  }: {
+    idPrefix: string;
+    side: BubbleSide;
+    speaker: string;
+    speakerColor: string;
+    body: string;
+    width: number;
+    bodyDim?: boolean;
+    detail?: string | null;
+    detailColor?: string;
+    detailDim?: boolean;
+  },
+): void {
+  const useWideBubble = prefersWideBubble(body);
+  const maxOuterWidth = useWideBubble
+    ? Math.max(18, width)
+    : Math.max(18, Math.min(width - 2, Math.floor(width * 0.72)));
+  const innerLimit = Math.max(14, maxOuterWidth - 4);
+  const wrappedBody = wrapTranscriptBody(body, innerLimit);
+  const innerWidth = Math.min(
+    innerLimit,
+    Math.max(14, ...wrappedBody.map((line) => displayWidth(line))),
+  );
+  const outerWidth = Math.min(width, innerWidth + 4);
+  const indent = side === "left"
+    ? 0
+    : side === "right"
+      ? Math.max(0, width - outerWidth)
+      : Math.max(0, Math.floor((width - outerWidth) / 2));
+  const indentText = " ".repeat(indent);
+  const labelText = side === "right"
+    ? `${indentText}${alignLine(speaker, outerWidth, "right")}`
+    : side === "center"
+      ? alignLine(speaker, width, "center")
+      : `${indentText}${speaker}`;
+
+  target.push({
+    id: `${idPrefix}-speaker`,
+    text: labelText,
+    color: speakerColor,
+    bold: true,
+  });
+  target.push({
+    id: `${idPrefix}-top`,
+    text: `${indentText}╭${"─".repeat(innerWidth + 2)}╮`,
+    color: speakerColor,
+  });
+  wrappedBody.forEach((line, index) => {
+    target.push({
+      id: `${idPrefix}-body-${index}`,
+      text: `${indentText}│ ${padDisplayLine(line, innerWidth)} │`,
+      dimColor: bodyDim,
+    });
+  });
+  target.push({
+    id: `${idPrefix}-bottom`,
+    text: `${indentText}╰${"─".repeat(innerWidth + 2)}╯`,
+    color: speakerColor,
+  });
+
+  if (detail) {
+    const wrappedDetail = wrapBlock(detail, innerLimit);
+    wrappedDetail.forEach((line, index) => {
+      const aligned = side === "right"
+        ? `${indentText}${alignLine(line, outerWidth, "right")}`
+        : side === "center"
+          ? alignLine(line, width, "center")
+          : `${indentText}${line}`;
+      target.push({
+        id: `${idPrefix}-detail-${index}`,
+        text: aligned,
+        color: detailColor,
+        dimColor: detailDim,
       });
-      if (entry.note) {
-        addWrappedLines(lines, `${entry.id}-note`, `Activity: ${entry.note}`, width, { dimColor: true }, "  ");
-      }
-      addWrappedLines(lines, `${entry.id}-body`, entry.text, width, {}, "  ");
-      addSpacer(lines, `${entry.id}-gap`);
+    });
+  }
+
+  addSpacer(target, `${idPrefix}-gap`);
+}
+
+function addSystemNote(
+  target: DisplayLine[],
+  idPrefix: string,
+  text: string,
+  width: number,
+  color = "gray",
+): void {
+  wrapBlock(text, Math.max(16, width - 8)).forEach((line, index) => {
+    target.push({
+      id: `${idPrefix}-${index}`,
+      text: `• ${line}`,
+      color,
+      dimColor: color === "gray",
+    });
+  });
+  addSpacer(target, `${idPrefix}-gap`);
+}
+
+export function compactPendingSuggestions(entries: TranscriptEntry[]): TranscriptEntry[] {
+  let latestPendingSuggestionIndex = -1;
+  entries.forEach((entry, index) => {
+    if (entry.kind === "local-suggestion" && entry.state === "pending") {
+      latestPendingSuggestionIndex = index;
+    }
+  });
+
+  if (latestPendingSuggestionIndex === -1) {
+    return entries;
+  }
+
+  return entries.filter((entry, index) =>
+    entry.kind !== "local-suggestion" || entry.state !== "pending" || index === latestPendingSuggestionIndex,
+  );
+}
+
+export function countTranscriptMessages(entries: TranscriptEntry[]): number {
+  return compactPendingSuggestions(entries).length;
+}
+
+export function buildHistoricalTranscriptLines(entries: TranscriptEntry[], width: number, session: SessionState): DisplayLine[] {
+  const lines: DisplayLine[] = [];
+  const guildLabel = session.worktreeName === "main" ? "Guild" : `Guild · ${session.worktreeName}`;
+
+  for (const entry of sortTranscriptEntries(compactPendingSuggestions(entries))) {
+    if (entry.kind === "remote-turn") {
+      addBubble(lines, {
+        idPrefix: entry.id,
+        side: "left",
+        speaker: `${guildLabel}${entry.activity ? ` · ${entry.activity}` : ` · ${entry.provider}`}`,
+        speakerColor: "cyan",
+        body: entry.text,
+        width,
+        detail: entry.note ? `Thinking: ${entry.note}` : undefined,
+      });
       continue;
     }
 
     if (entry.kind === "local-suggestion") {
-      lines.push({
-        id: `${entry.id}-label`,
-        text: `ROSCOE [${entry.confidence}/100] [${entry.state === "dismissed" ? "dismissed" : "draft"}]`,
-        color: entry.state === "dismissed" ? "yellow" : confidenceColor(entry.confidence),
-        bold: true,
-      });
-      addWrappedLines(
-        lines,
-        `${entry.id}-body`,
-        entry.text,
+      const draftText = normalizeRoscoeDraftMessage(entry.text).trim();
+      addBubble(lines, {
+        idPrefix: entry.id,
+        side: "right",
+        speaker: `${draftText ? "Roscoe draft" : "Roscoe hold"} · ${entry.confidence}/100${entry.state === "dismissed" ? " · dismissed" : ""}`,
+        speakerColor: entry.state === "dismissed" ? "yellow" : confidenceColor(entry.confidence),
+        body: formatRoscoeDraftDisplayText(entry.text),
         width,
-        { dimColor: entry.state === "dismissed" },
-        "  ",
-      );
-      if (entry.reasoning) {
-        addWrappedLines(
-          lines,
-          `${entry.id}-why`,
-          `Reasoning: ${entry.reasoning}`,
-          width,
-          { dimColor: true },
-          "  ",
-        );
-      }
-      addSpacer(lines, `${entry.id}-gap`);
+        bodyDim: entry.state === "dismissed",
+        detail: entry.reasoning ? `Why: ${entry.reasoning}` : undefined,
+      });
       continue;
     }
 
     if (entry.kind === "local-sent") {
-      lines.push({
-        id: `${entry.id}-label`,
-        text: `ROSCOE [${entry.delivery}]${typeof entry.confidence === "number" ? ` [${entry.confidence}/100]` : ""}`,
-        color: deliveryColor(entry.delivery),
-        bold: true,
+      const sentText = normalizeRoscoeDraftMessage(entry.text).trim();
+      const speakerBase = entry.delivery === "manual"
+        ? "You"
+        : sentText
+          ? "Roscoe"
+          : "Roscoe hold";
+      addBubble(lines, {
+        idPrefix: entry.id,
+        side: "right",
+        speaker: `${speakerBase} · ${entry.delivery}${typeof entry.confidence === "number" ? ` · ${entry.confidence}/100` : ""}`,
+        speakerColor: deliveryColor(entry.delivery),
+        body: sentText ? sentText : "No Guild message was sent.",
+        width,
+        detail: entry.reasoning ? `Why: ${entry.reasoning}` : undefined,
       });
-      addWrappedLines(lines, `${entry.id}-body`, entry.text, width, {}, "  ");
-      if (entry.reasoning) {
-        addWrappedLines(lines, `${entry.id}-why`, `Reasoning: ${entry.reasoning}`, width, { dimColor: true }, "  ");
-      }
-      addSpacer(lines, `${entry.id}-gap`);
       continue;
     }
 
     if (entry.kind === "tool-activity") {
-      lines.push({
-        id: `${entry.id}-tool`,
-        text: `${guildLabel} ACTIVITY [${entry.provider}] ${entry.toolName}`,
-        color: "yellow",
-        dimColor: true,
-      });
-      addSpacer(lines, `${entry.id}-gap`);
+      const activityText = getToolActivityNoteText(entry.toolName, entry.text) ?? entry.toolName;
+      addSystemNote(
+        lines,
+        `${entry.id}-tool`,
+        `${entry.provider === "twilio" || entry.provider === "roscoe" ? "Roscoe action" : "Guild tool"} · ${activityText}`,
+        width,
+        entry.provider === "twilio" || entry.provider === "roscoe" ? "magenta" : "yellow",
+      );
       continue;
     }
 
-    lines.push({
-      id: `${entry.id}-error`,
-      text: `ERROR ${entry.text}`,
-      color: "red",
-      bold: true,
-    });
-    addSpacer(lines, `${entry.id}-gap`);
+    if (entry.kind === "preview") {
+      addSystemNote(
+        lines,
+        `${entry.id}-preview`,
+        `${entry.state === "ready" ? "Preview ready" : "Preview queued"} · ${entry.text}`,
+        width,
+        entry.state === "ready" ? "magenta" : "cyan",
+      );
+      continue;
+    }
+
+    addSystemNote(
+      lines,
+      `${entry.id}-error`,
+      `${entry.source === "sidecar" ? "Roscoe error" : "Guild error"} · ${entry.source === "sidecar" ? normalizeLegacySidecarErrorText(entry.text) : entry.text}`,
+      width,
+      "red",
+    );
   }
 
   return lines;
 }
 
-function buildRawLines(lines: string[], width: number): DisplayLine[] {
+export function buildLiveTranscriptLines(session: SessionState, width: number, heartbeat: number): DisplayLine[] {
+  const lines: DisplayLine[] = [];
+  const guildLabel = session.worktreeName === "main" ? "Guild" : `Guild · ${session.worktreeName}`;
+  const heartbeatFrames = ["·  ", "•• ", "•••"];
+  const heartbeatFrame = heartbeatFrames[heartbeat % heartbeatFrames.length];
+  if (session.suggestion.kind === "generating") {
+    addBubble(lines, {
+      idPrefix: "live-roscoe-thinking",
+      side: "right",
+      speaker: "Roscoe",
+      speakerColor: "magenta",
+      body: `Thinking${heartbeatFrame}`,
+      width,
+      bodyDim: true,
+    });
+  } else if (session.suggestion.kind === "manual-input" || session.suggestion.kind === "editing") {
+    addBubble(lines, {
+      idPrefix: "live-you",
+      side: "right",
+      speaker: "You",
+      speakerColor: "yellow",
+      body: "On deck to reply.",
+      width,
+      bodyDim: true,
+    });
+  } else if ((session.status === "active" || session.status === "generating") && !session.managed.awaitingInput) {
+    addBubble(lines, {
+      idPrefix: "live-guild-working",
+      side: "left",
+      speaker: guildLabel,
+      speakerColor: "cyan",
+      body: `${getToolActivityLiveText(session.currentToolUse, session.currentToolDetail) ?? "Working now"}${heartbeatFrame}`,
+      width,
+      bodyDim: true,
+    });
+  }
+
+  return lines;
+}
+
+export function buildRawLines(lines: string[], width: number): DisplayLine[] {
   const output: DisplayLine[] = [];
 
   lines.forEach((line, index) => {
@@ -265,6 +412,19 @@ function buildRawLines(lines: string[], width: number): DisplayLine[] {
 export function SessionOutput({ session, sessionLabel }: SessionOutputProps) {
   const contentRef = useRef<any>(null);
   const [viewport, setViewport] = useState({ width: 80, height: 14 });
+  const [heartbeat, setHeartbeat] = useState(0);
+
+  useEffect(() => {
+    if (!session || session.viewMode !== "transcript") return;
+    const shouldAnimate = session.suggestion.kind === "generating"
+      || (session.followLive && ((session.status === "active" || session.status === "generating") && !session.managed.awaitingInput));
+    if (!shouldAnimate) return;
+
+    const timer = setInterval(() => {
+      setHeartbeat((current) => current + 1);
+    }, 220);
+    return () => clearInterval(timer);
+  }, [session]);
 
   useEffect(() => {
     if (!contentRef.current) return;
@@ -283,35 +443,49 @@ export function SessionOutput({ session, sessionLabel }: SessionOutputProps) {
     }
   });
 
-  const title = sessionLabel ? `Session Transcript — ${sessionLabel}` : "Session Transcript";
+  const title = sessionLabel ? `Lane Transcript — ${sessionLabel}` : "Lane Transcript";
   const contentWidth = Math.max(24, viewport.width - 1);
-  const traceLines = useMemo(() => {
+  const historicalTranscriptLines = useMemo(() => {
     if (!session || session.viewMode !== "transcript") return [];
-    return buildTraceLines(session, contentWidth);
-  }, [contentWidth, session]);
-  const renderedLines = useMemo(() => {
-    if (!session) return [];
-    if (session.viewMode === "transcript") {
-      return buildTranscriptLines(session.timeline, contentWidth, session);
-    }
+    return buildHistoricalTranscriptLines(session.timeline, contentWidth, session);
+  }, [contentWidth, session?.timeline, session?.viewMode, session?.worktreeName]);
+  const liveTranscriptLines = useMemo(() => {
+    if (!session || session.viewMode !== "transcript") return [];
+    return buildLiveTranscriptLines(session, contentWidth, heartbeat);
+  }, [
+    contentWidth,
+    heartbeat,
+    session?.currentToolDetail,
+    session?.currentToolUse,
+    session?.managed.awaitingInput,
+    session?.status,
+    session?.suggestion.kind,
+    session?.viewMode,
+    session?.worktreeName,
+  ]);
+  const rawLines = useMemo(() => {
+    if (!session || session.viewMode !== "raw") return [];
     return buildRawLines(session.outputLines, contentWidth);
-  }, [contentWidth, session]);
+  }, [contentWidth, session?.outputLines, session?.viewMode]);
+  const renderedLines = session?.viewMode === "transcript"
+    ? [...historicalTranscriptLines, ...liveTranscriptLines]
+    : rawLines;
 
   if (!session) {
     return (
-      <Panel
-        title={title}
-        subtitle="Bird's-eye session view"
-        rightLabel="idle"
-        accentColor="gray"
-        flexGrow={1}
-      >
+        <Panel
+          title={title}
+          subtitle="Bird's-eye lane view"
+          rightLabel="idle"
+          accentColor="gray"
+          flexGrow={1}
+        >
         <Box flexDirection="column">
           <Text dimColor italic>
             Waiting for output...
           </Text>
           <Text dimColor>
-            Remote and local turns will appear here once the active session starts working.
+            Remote and local turns will appear here once the active lane starts working.
           </Text>
         </Box>
       </Panel>
@@ -331,27 +505,20 @@ export function SessionOutput({ session, sessionLabel }: SessionOutputProps) {
   return (
     <Panel
       title={title}
-      subtitle={session.viewMode === "transcript" ? "Guild/Roscoe trace plus the live session transcript" : "Raw Guild worker output"}
+      subtitle={session.viewMode === "transcript" ? "One continuous Guild, Roscoe, and user conversation for this lane" : "Raw Guild worker output"}
       rightLabel={
         session.followLive
-          ? `${session.viewMode} · live · ${session.viewMode === "transcript" ? `${session.timeline.length} events` : `${session.outputLines.length} lines`}`
+          ? `${session.viewMode} · live · ${session.viewMode === "transcript" ? `${countTranscriptMessages(session.timeline)} messages` : `${session.outputLines.length} lines`}`
           : `${session.viewMode} · scrolled`
       }
       accentColor={session.viewMode === "transcript" ? "cyan" : "gray"}
       flexGrow={1}
+      bodyFlexGrow
     >
-      {traceLines.length > 0 && (
-        <Box flexDirection="column" marginBottom={1}>
-          {traceLines.map((line) => (
-            <Text
-              key={line.id}
-              color={line.color}
-              bold={line.bold}
-              dimColor={line.dimColor}
-            >
-              {line.text || " "}
-            </Text>
-          ))}
+      {session.viewMode === "transcript" && session.followLive && hiddenAbove > 0 && (
+        <Box marginBottom={1} gap={1}>
+          <Pill label="history above" color="yellow" />
+          <Text dimColor>{hiddenAbove} earlier lines. Press ↑ to review the prior conversation.</Text>
         </Box>
       )}
       <Box ref={contentRef} flexDirection="column" flexGrow={1} overflow="hidden">
@@ -362,7 +529,7 @@ export function SessionOutput({ session, sessionLabel }: SessionOutputProps) {
             </Text>
             <Text dimColor>
               {session.viewMode === "transcript"
-                ? "The next remote turn and local responder draft will appear here."
+                ? "The next Guild or Roscoe message will appear here."
                 : "Switch back to transcript or wait for the worker to emit more output."}
             </Text>
           </Box>

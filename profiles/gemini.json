@@ -1,0 +1,6 @@
+{
+  "name": "gemini",
+  "command": "gemini",
+  "args": [],
+  "protocol": "gemini"
+}

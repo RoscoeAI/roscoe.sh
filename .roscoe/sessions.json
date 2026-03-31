@@ -1,0 +1,46 @@
+{
+  "sessions": [
+    {
+      "laneKey": "/Users/timheckel/Projects/node/roscoe/roscoe.sh::/Users/timheckel/Projects/node/roscoe/roscoe.sh::main::claude-code",
+      "projectDir": "/Users/timheckel/Projects/node/roscoe/roscoe.sh",
+      "projectName": "roscoe.sh",
+      "worktreePath": "/Users/timheckel/Projects/node/roscoe/roscoe.sh",
+      "worktreeName": "main",
+      "profileName": "claude-code",
+      "protocol": "claude",
+      "providerSessionId": null,
+      "responderProtocol": "claude",
+      "responderSessionId": null,
+      "trackerHistory": [
+        {
+          "role": "user",
+          "content": "You are a Guild coding agent working on the \"roscoe.sh\" project. Runtime tuning mode: auto. Review the codebase and await further instructions. When execution begins, favor thin slices, narrow proof, and progressive hardening instead of exhaustive upfront test work. If your runtime supports native agent or sub-agent delegation, you may use it for bounded parallel subtasks when it shortens the feedback loop without obscuring ownership.",
+          "timestamp": 1774806876997
+        }
+      ],
+      "responderHistoryCursor": 0,
+      "timeline": [],
+      "preview": {
+        "mode": "off",
+        "message": null,
+        "link": null
+      },
+      "outputLines": [],
+      "summary": null,
+      "currentToolUse": null,
+      "currentToolDetail": null,
+      "status": "active",
+      "startedAt": "2026-03-29T17:54:35.140Z",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cachedInputTokens": 0,
+        "cacheCreationInputTokens": 0
+      },
+      "rateLimitStatus": null,
+      "pendingOperatorMessages": [],
+      "contractFingerprint": null,
+      "savedAt": "2026-03-29T17:54:37.008Z"
+    }
+  ]
+}

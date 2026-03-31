@@ -8,24 +8,50 @@ import { resolve, dirname, basename } from "path";
 import { homedir } from "os";
 import { readdirSync } from "fs";
 import { KeyHints, Panel, Pill } from "./chrome.js";
-import { listProfiles, loadProfile, loadProjectContext, OnboardingMode, ProjectRuntimeDefaults } from "../config.js";
-import { detectProtocol, RuntimeControlSettings } from "../llm-runtime.js";
+import {
+  listProfiles,
+  loadProfile,
+  loadProjectContext,
+  loadRoscoeSettings,
+  OnboardingMode,
+  ProjectRuntimeDefaults,
+  ResponderApprovalMode,
+  TokenEfficiencyMode,
+  VerificationCadence,
+  resolveProjectRoot,
+  WorkerGovernanceMode,
+} from "../config.js";
+import { filterProfilesBySelectableProviders, getSelectableProviderIds } from "../provider-registry.js";
+import { detectProtocol, getProviderAdapter, LLMProtocol, RuntimeControlSettings } from "../llm-runtime.js";
 import {
   applyRuntimeSettings,
+  formatTokenEfficiencyLabel,
+  formatVerificationCadenceLabel,
+  formatResponderApprovalLabel,
+  formatWorkerGovernanceLabel,
   getAcceleratedWorkerRuntime,
+  getDefaultProfileName,
   getDefaultOnboardingRuntime,
   getDefaultWorkerRuntime,
-  getLockedProjectProvider,
+  getExecutionModeLabel,
+  getGuildProvider,
+  getResponderProvider,
+  getTokenEfficiencyMode,
+  getVerificationCadence,
+  getResponderApprovalMode,
   getTopModel,
+  getWorkerGovernanceMode,
   mergeRuntimeSettings,
   recommendOnboardingRuntime,
 } from "../runtime-defaults.js";
+import { inspectWorkspaceForOnboarding } from "../workspace-intake.js";
 import {
   RuntimeEditorPanel,
+  RuntimeEditorDraft,
   RuntimeSummaryPills,
-  getReasoningOptions,
 } from "./runtime-controls.js";
 import { ChecklistSelect } from "./checklist-select.js";
+import { ProjectSecretRequest } from "../project-secrets.js";
 
 interface OnboardingScreenProps {
   dir?: string;
@@ -36,7 +62,7 @@ interface OnboardingScreenProps {
   initialRefineThemes?: string[];
 }
 
-type SetupStep = "directory" | "themes" | "profile" | "model" | "effort" | "tuning" | "execution";
+type SetupStep = "directory" | "themes" | "runtime";
 
 const REFINE_THEME_OPTIONS = [
   "project-story",
@@ -47,6 +73,7 @@ const REFINE_THEME_OPTIONS = [
   "coverage-mechanism",
   "non-goals",
   "constraints",
+  "architecture-principles",
   "autonomy-rules",
   "quality-bar",
   "risk-boundaries",
@@ -58,13 +85,13 @@ const HEARTBEAT_FRAMES = ["·", "•", "∙", "•"];
 function getSetupOrder(mode: OnboardingMode, hasPresetDirectory: boolean): SetupStep[] {
   if (mode === "refine") {
     return hasPresetDirectory
-      ? ["themes", "model", "effort", "tuning", "execution"]
-      : ["directory", "themes", "model", "effort", "tuning", "execution"];
+      ? ["themes", "runtime"]
+      : ["directory", "themes", "runtime"];
   }
 
   return hasPresetDirectory
-    ? ["profile", "model", "effort", "tuning", "execution"]
-    : ["directory", "profile", "model", "effort", "tuning", "execution"];
+    ? ["runtime"]
+    : ["directory", "runtime"];
 }
 
 export function getPreviousOnboardingStep(
@@ -78,14 +105,14 @@ export function getPreviousOnboardingStep(
   return order[index - 1];
 }
 
-function expandTilde(p: string): string {
+export function expandTilde(p: string): string {
   if (p === "~") return homedir();
   if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));
   return p;
 }
 
 /** List subdirectories matching the current input for autocomplete */
-function getDirSuggestions(input: string): string[] {
+export function getDirSuggestions(input: string): string[] {
   if (!input) return [];
   try {
     const expanded = expandTilde(input);
@@ -152,6 +179,72 @@ function CompletedQA({ qa, index }: { qa: QAPair; index: number }) {
   );
 }
 
+function SecretInput({
+  request,
+  onSubmit,
+  onSkip,
+}: {
+  request: ProjectSecretRequest;
+  onSubmit: (value: string) => void;
+  onSkip: () => void;
+}) {
+  const [value, setValue] = useState("");
+
+  useInput((input, key) => {
+    if (key.return) {
+      if (value.trim()) {
+        onSubmit(value);
+        setValue("");
+      }
+      return;
+    }
+
+    if (input.toLowerCase() === "s" && !key.ctrl && !key.shift) {
+      onSkip();
+      return;
+    }
+
+    if (key.ctrl && input.toLowerCase() === "u") {
+      setValue("");
+      return;
+    }
+
+    if (key.backspace || key.delete) {
+      setValue((current) => current.slice(0, -1));
+      return;
+    }
+
+    if (!input || key.tab || key.escape || key.upArrow || key.downArrow || key.leftArrow || key.rightArrow) {
+      return;
+    }
+
+    setValue((current) => current + input);
+  }, { isActive: true });
+
+  const maskedValue = value.length > 0
+    ? `${"•".repeat(Math.min(value.length, 32))}${value.length > 32 ? "…" : ""} (${value.length} chars)`
+    : "Paste the secret value here";
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Box>
+        <Text color="yellow">Secret input: </Text>
+        <Text>{maskedValue}</Text>
+      </Box>
+      <Text dimColor>
+        Env var: <Text color="cyan">{request.key}</Text> · Save to <Text color="magenta">{request.targetFile}</Text>
+      </Text>
+      <KeyHints
+        items={[
+          { keyLabel: "Enter", description: "save secret securely" },
+          { keyLabel: "s", description: "skip for now" },
+          { keyLabel: "Ctrl+U", description: "clear pasted value" },
+        ]}
+      />
+    </Box>
+  );
+}
+
 /** Build Select options: Claude's options + permanent "Other" and "Skip" */
 function buildOptions(questionOptions: string[]) {
   // Dedupe: remove any "Other" variant Claude already included
@@ -165,6 +258,25 @@ function buildOptions(questionOptions: string[]) {
   ];
 }
 
+interface SubmittedProjectDir {
+  enteredDir: string;
+  suggestedDir: string;
+  needsConfirmation: boolean;
+}
+
+export function inspectSubmittedProjectDir(value: string): SubmittedProjectDir | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const enteredDir = resolve(expandTilde(trimmed));
+  const suggestedDir = resolveProjectRoot(enteredDir);
+  return {
+    enteredDir,
+    suggestedDir,
+    needsConfirmation: suggestedDir !== enteredDir,
+  };
+}
+
 export function OnboardingScreen({
   dir,
   debug,
@@ -174,59 +286,93 @@ export function OnboardingScreen({
   initialRefineThemes = [],
 }: OnboardingScreenProps) {
   const { dispatch } = useAppContext();
-  const { state: s, start, sendInput, updateRuntime } = useOnboarding();
-  const profiles = listProfiles();
-  const resolvedDir = dir ? resolve(expandTilde(dir)) : "";
+  const { state: s, start, sendInput, sendSecretInput, skipSecretInput, updateRuntime } = useOnboarding();
+  const roscoeSettings = loadRoscoeSettings();
+  const allProfiles = listProfiles();
+  const resolvedDir = dir ? resolveProjectRoot(resolve(expandTilde(dir))) : "";
   const savedProjectContext = resolvedDir ? loadProjectContext(resolvedDir) : null;
-  const lockedProvider = getLockedProjectProvider(savedProjectContext);
-  const defaultProfileName = profiles.includes("claude-code")
-    ? "claude-code"
-    : profiles.includes("codex")
-      ? "codex"
-      : profiles[0] ?? "claude-code";
+  const savedGuildProvider = getGuildProvider(savedProjectContext);
+  const savedResponderProvider = getResponderProvider(savedProjectContext);
+  const configuredProfiles = filterProfilesBySelectableProviders(
+    allProfiles,
+    roscoeSettings,
+    [
+      ...(savedGuildProvider ? [savedGuildProvider] : []),
+      ...(savedResponderProvider ? [savedResponderProvider] : []),
+    ],
+  );
+  const profiles = configuredProfiles.length > 0 ? configuredProfiles : allProfiles;
+  const allowedProviders = getSelectableProviderIds(
+    roscoeSettings,
+    [
+      ...(savedGuildProvider ? [savedGuildProvider] : []),
+      ...(savedResponderProvider ? [savedResponderProvider] : []),
+    ],
+  );
+  const defaultProfileName = profiles[0] ?? getDefaultProfileName("claude");
   const initialSelectedProfileName = initialProfileName
     ?? savedProjectContext?.runtimeDefaults?.onboarding?.profileName
-    ?? (lockedProvider === "codex" ? "codex" : defaultProfileName);
+    ?? (savedResponderProvider ? getDefaultProfileName(savedResponderProvider) : defaultProfileName);
   const initialSetupOrder = getSetupOrder(initialMode, Boolean(dir));
   const [step, setStep] = useState<SetupStep>(initialSetupOrder[0]);
   const [selectedDir, setSelectedDir] = useState(resolvedDir);
   const [selectedProfileName, setSelectedProfileName] = useState(initialSelectedProfileName);
-  const initialProtocol = detectProtocol(loadProfile(initialSelectedProfileName));
-  const initialRuntime = mergeRuntimeSettings(
-    getDefaultOnboardingRuntime(initialProtocol),
+  const initialResponderProvider = detectProtocol(loadProfile(initialSelectedProfileName));
+  const initialGuildProvider = savedGuildProvider ?? initialResponderProvider;
+  const initialGuildRuntime = mergeRuntimeSettings(
+    getDefaultWorkerRuntime(initialGuildProvider),
+    savedProjectContext?.runtimeDefaults?.workerByProtocol?.[initialGuildProvider],
+  );
+  const initialResponderRuntime = mergeRuntimeSettings(
+    getDefaultOnboardingRuntime(initialResponderProvider),
+    savedProjectContext?.runtimeDefaults?.responderByProtocol?.[initialResponderProvider],
+    savedProjectContext?.runtimeDefaults?.onboarding?.runtime,
     initialRuntimeOverrides,
   );
-  const [selectedModel, setSelectedModel] = useState(initialRuntime.model ?? getTopModel(initialProtocol));
-  const [selectedEffort, setSelectedEffort] = useState(initialRuntime.reasoningEffort ?? (initialProtocol === "claude" ? "max" : "xhigh"));
-  const [selectedTuningMode, setSelectedTuningMode] = useState<"manual" | "auto">(initialRuntime.tuningMode === "manual" ? "manual" : "auto");
-  const [selectedExecutionMode, setSelectedExecutionMode] = useState<"safe" | "accelerated">(initialRuntime.executionMode === "accelerated" ? "accelerated" : "safe");
+  const [selectedGuildProvider, setSelectedGuildProvider] = useState(initialGuildProvider);
+  const [selectedModel, setSelectedModel] = useState(initialGuildRuntime.model ?? getTopModel(initialGuildProvider));
+  const [selectedEffort, setSelectedEffort] = useState(
+    initialGuildRuntime.reasoningEffort ?? getProviderAdapter(initialGuildProvider).defaultReasoningEffort,
+  );
+  const [selectedResponderModel, setSelectedResponderModel] = useState(initialResponderRuntime.model ?? getTopModel(initialResponderProvider));
+  const [selectedResponderEffort, setSelectedResponderEffort] = useState(
+    initialResponderRuntime.reasoningEffort ?? getProviderAdapter(initialResponderProvider).onboardingReasoningEffort,
+  );
+  const [selectedTuningMode, setSelectedTuningMode] = useState<"manual" | "auto">(initialGuildRuntime.tuningMode === "manual" ? "manual" : "auto");
+  const [selectedExecutionMode, setSelectedExecutionMode] = useState<"safe" | "accelerated">(getExecutionModeLabel(initialGuildRuntime) as "safe" | "accelerated");
+  const [selectedWorkerGovernanceMode, setSelectedWorkerGovernanceMode] = useState<WorkerGovernanceMode>(
+    savedProjectContext ? getWorkerGovernanceMode(savedProjectContext) : "roscoe-arbiter",
+  );
+  const [selectedVerificationCadence, setSelectedVerificationCadence] = useState<VerificationCadence>(
+    getVerificationCadence(savedProjectContext),
+  );
+  const [selectedTokenEfficiencyMode, setSelectedTokenEfficiencyMode] = useState<TokenEfficiencyMode>(
+    getTokenEfficiencyMode(savedProjectContext),
+  );
+  const [selectedResponderApprovalMode, setSelectedResponderApprovalMode] = useState<ResponderApprovalMode>(
+    getResponderApprovalMode(savedProjectContext) ?? "auto",
+  );
   const [selectedRefineThemes, setSelectedRefineThemes] = useState<string[]>(initialRefineThemes);
+  const workspaceAssessment = useMemo(
+    () => selectedDir ? inspectWorkspaceForOnboarding(selectedDir) : null,
+    [selectedDir],
+  );
 
   const [started, setStarted] = useState(false);
   const [freeTextMode, setFreeTextMode] = useState(false);
   const [freeTextKey, setFreeTextKey] = useState(0);
-  const [modelInputKey, setModelInputKey] = useState(0);
   const [runtimeEditorOpen, setRuntimeEditorOpen] = useState(false);
   const [pendingStructuredAnswer, setPendingStructuredAnswer] = useState<{
     mode: "single" | "multi";
     selectedOptions: string[];
   } | null>(null);
+  const [pendingDirConfirmation, setPendingDirConfirmation] = useState<SubmittedProjectDir | null>(null);
   const [heartbeat, setHeartbeat] = useState(0);
 
-  const selectedProtocol = useMemo(
+  const selectedResponderProtocol = useMemo(
     () => detectProtocol(loadProfile(selectedProfileName)),
     [selectedProfileName],
   );
-  const profileItems = profiles.map((profileName) => ({ label: profileName, value: profileName }));
-  const effortItems = getReasoningOptions(selectedProtocol).map((value) => ({ label: value, value }));
-  const tuningItems = [
-    { label: "Auto-manage model and reasoning inside this provider", value: "auto" },
-    { label: "Manual pin on the chosen model and reasoning effort", value: "manual" },
-  ];
-  const executionItems = [
-    { label: "Safe autonomous", value: "safe" },
-    { label: "Accelerated / unsafe", value: "accelerated" },
-  ];
   const previousSetupStep = getPreviousOnboardingStep(step, Boolean(dir), initialMode);
 
   useEffect(() => {
@@ -239,25 +385,44 @@ export function OnboardingScreen({
 
   const buildRuntimePackage = (
     executionMode: "safe" | "accelerated" = selectedExecutionMode,
-    overrides?: Partial<RuntimeControlSettings>,
+    overrides?: Partial<RuntimeControlSettings> & {
+      guildProvider?: LLMProtocol;
+      responderProfileName?: string;
+      workerTuningMode?: "manual" | "auto";
+      workerModel?: string;
+      workerReasoningEffort?: string;
+      responderModel?: string;
+      responderReasoningEffort?: string;
+      workerGovernanceMode?: WorkerGovernanceMode;
+      verificationCadence?: VerificationCadence;
+      tokenEfficiencyMode?: TokenEfficiencyMode;
+      responderApprovalMode?: ResponderApprovalMode;
+    },
   ) => {
-    const protocol = selectedProtocol;
-    const baseProfile = loadProfile(selectedProfileName);
-    const tuningMode = overrides?.tuningMode === "manual" || overrides?.tuningMode === "auto"
-      ? overrides.tuningMode
+    const guildProvider = overrides?.guildProvider ?? selectedGuildProvider;
+    const responderProfileName = overrides?.responderProfileName ?? selectedProfileName;
+    const responderProtocol = detectProtocol(loadProfile(responderProfileName));
+    const baseProfile = loadProfile(responderProfileName);
+    const tuningMode = overrides?.workerTuningMode === "manual" || overrides?.workerTuningMode === "auto"
+      ? overrides.workerTuningMode
       : selectedTuningMode;
-    const model = overrides?.model ?? selectedModel;
-    const reasoningEffort = overrides?.reasoningEffort ?? selectedEffort;
+    const model = overrides?.workerModel ?? selectedModel;
+    const reasoningEffort = overrides?.workerReasoningEffort ?? selectedEffort;
+    const responderModel = overrides?.responderModel ?? selectedResponderModel;
+    const responderReasoningEffort = overrides?.responderReasoningEffort ?? selectedResponderEffort;
+    const workerGovernanceMode = overrides?.workerGovernanceMode ?? selectedWorkerGovernanceMode;
+    const verificationCadence = overrides?.verificationCadence ?? selectedVerificationCadence;
+    const tokenEfficiencyMode = overrides?.tokenEfficiencyMode ?? selectedTokenEfficiencyMode;
+    const responderApprovalMode = overrides?.responderApprovalMode ?? selectedResponderApprovalMode;
     const onboardingRuntime = mergeRuntimeSettings(
       executionMode === "accelerated"
-        ? getAcceleratedWorkerRuntime(protocol)
-        : getDefaultOnboardingRuntime(protocol),
-      {
-        tuningMode,
-        model,
-        reasoningEffort,
-        executionMode,
-      },
+        ? getAcceleratedWorkerRuntime(responderProtocol)
+        : getDefaultOnboardingRuntime(responderProtocol),
+      savedProjectContext?.runtimeDefaults?.onboarding?.runtime,
+      initialRuntimeOverrides,
+      { executionMode },
+      responderModel ? { model: responderModel } : undefined,
+      responderReasoningEffort ? { reasoningEffort: responderReasoningEffort } : undefined,
     );
     const baselineProfile = applyRuntimeSettings(baseProfile, onboardingRuntime);
     const onboardingPlan = recommendOnboardingRuntime(baselineProfile);
@@ -266,10 +431,10 @@ export function OnboardingScreen({
       claude: getDefaultWorkerRuntime("claude"),
       codex: getDefaultWorkerRuntime("codex"),
     };
-    workerByProtocol[protocol] = mergeRuntimeSettings(
+    workerByProtocol[guildProvider] = mergeRuntimeSettings(
       executionMode === "accelerated"
-        ? getAcceleratedWorkerRuntime(protocol)
-        : getDefaultWorkerRuntime(protocol),
+        ? getAcceleratedWorkerRuntime(guildProvider)
+        : getDefaultWorkerRuntime(guildProvider),
       {
         tuningMode,
         model,
@@ -279,12 +444,30 @@ export function OnboardingScreen({
     );
 
     const runtimeDefaults: ProjectRuntimeDefaults = {
-      lockedProvider: protocol,
+      lockedProvider: guildProvider,
+      guildProvider,
+      responderProvider: responderProtocol,
       workerByProtocol,
+      responderByProtocol: {
+        [responderProtocol]: mergeRuntimeSettings(
+          executionMode === "accelerated"
+            ? getAcceleratedWorkerRuntime(responderProtocol)
+            : getDefaultWorkerRuntime(responderProtocol),
+          {
+            tuningMode: "manual",
+            model: responderModel,
+            reasoningEffort: responderReasoningEffort,
+          },
+        ),
+      },
       onboarding: {
-        profileName: selectedProfileName,
+        profileName: responderProfileName,
         runtime: onboardingRuntime,
       },
+      workerGovernanceMode,
+      verificationCadence,
+      tokenEfficiencyMode,
+      responderApprovalMode,
     };
 
     return {
@@ -308,6 +491,11 @@ export function OnboardingScreen({
     if (!key.escape) return;
 
     if (!started) {
+      if (step === "directory" && pendingDirConfirmation) {
+        setPendingDirConfirmation(null);
+        return;
+      }
+
       if (previousSetupStep === "back") {
         dispatch({ type: "GO_BACK" });
         return;
@@ -333,34 +521,41 @@ export function OnboardingScreen({
     }
   }, [s.status, dispatch]);
 
+  const acceptDirectory = (directory: string) => {
+    setPendingDirConfirmation(null);
+    setSelectedDir(directory);
+    setStep(initialMode === "refine" ? "themes" : "runtime");
+  };
+
   const handleDirSubmit = (value: string) => {
-    const resolved = resolve(expandTilde(value.trim()));
-    if (!resolved) return;
-    setSelectedDir(resolved);
-    setStep(initialMode === "refine" ? "themes" : "profile");
+    const submitted = inspectSubmittedProjectDir(value);
+    if (!submitted) return;
+
+    if (submitted.needsConfirmation) {
+      setPendingDirConfirmation(submitted);
+      return;
+    }
+
+    acceptDirectory(submitted.suggestedDir);
   };
 
-  const handleProfileSelect = (profileName: string) => {
-    setSelectedProfileName(profileName);
-    const protocol = detectProtocol(loadProfile(profileName));
-    const defaults = mergeRuntimeSettings(getDefaultOnboardingRuntime(protocol));
-    setSelectedModel(initialRuntimeOverrides?.model ?? defaults.model ?? getTopModel(protocol));
-    setSelectedEffort(initialRuntimeOverrides?.reasoningEffort ?? defaults.reasoningEffort ?? (protocol === "claude" ? "max" : "xhigh"));
-    setSelectedTuningMode(initialRuntimeOverrides?.tuningMode === "manual" ? "manual" : defaults.tuningMode === "manual" ? "manual" : "auto");
-    setSelectedExecutionMode(initialRuntimeOverrides?.executionMode === "accelerated" ? "accelerated" : "safe");
-    setModelInputKey((current) => current + 1);
-    setStep("model");
-  };
-
-  const handleModelSubmit = (value: string) => {
-    const protocol = selectedProtocol;
-    const trimmed = value.trim();
-    setSelectedModel(trimmed || getTopModel(protocol));
-    setStep("effort");
-  };
-
-  const startConfiguredOnboarding = (executionMode: "safe" | "accelerated") => {
-    const { resolvedProfile, runtimeDefaults } = buildRuntimePackage(executionMode);
+  const startConfiguredOnboarding = (
+    executionMode: "safe" | "accelerated",
+    overrides?: Partial<RuntimeControlSettings> & {
+      guildProvider?: LLMProtocol;
+      responderProfileName?: string;
+      workerTuningMode?: "manual" | "auto";
+      workerModel?: string;
+      workerReasoningEffort?: string;
+      responderModel?: string;
+      responderReasoningEffort?: string;
+      workerGovernanceMode?: WorkerGovernanceMode;
+      verificationCadence?: VerificationCadence;
+      tokenEfficiencyMode?: TokenEfficiencyMode;
+      responderApprovalMode?: ResponderApprovalMode;
+    },
+  ) => {
+    const { resolvedProfile, runtimeDefaults } = buildRuntimePackage(executionMode, overrides);
 
     setSelectedExecutionMode(executionMode);
     setStarted(true);
@@ -374,11 +569,54 @@ export function OnboardingScreen({
     );
   };
 
-  const applyRuntimeEdit = (draft: { tuningMode: "manual" | "auto"; model: string; reasoningEffort: string }) => {
-    setSelectedModel(draft.model);
-    setSelectedEffort(draft.reasoningEffort);
-    setSelectedTuningMode(draft.tuningMode);
-    const { resolvedProfile, runtimeDefaults } = buildRuntimePackage(selectedExecutionMode, draft);
+  const applySetupRuntimeEdit = (draft: RuntimeEditorDraft) => {
+    const nextResponderProfileName = getDefaultProfileName(draft.responderProvider);
+    setSelectedGuildProvider(draft.workerProvider);
+    setSelectedProfileName(nextResponderProfileName);
+    setSelectedExecutionMode(draft.workerExecutionMode);
+    setSelectedModel(draft.workerModel);
+    setSelectedEffort(draft.workerReasoningEffort);
+    setSelectedResponderModel(draft.responderModel);
+    setSelectedResponderEffort(draft.responderReasoningEffort);
+    setSelectedTuningMode(draft.workerTuningMode);
+    setSelectedWorkerGovernanceMode(draft.workerGovernanceMode);
+    setSelectedVerificationCadence(draft.verificationCadence);
+    setSelectedTokenEfficiencyMode(draft.tokenEfficiencyMode);
+    setSelectedResponderApprovalMode(draft.responderApprovalMode);
+    startConfiguredOnboarding(draft.workerExecutionMode, {
+      guildProvider: draft.workerProvider,
+      responderProfileName: nextResponderProfileName,
+      workerTuningMode: draft.workerTuningMode,
+      workerModel: draft.workerModel,
+      workerReasoningEffort: draft.workerReasoningEffort,
+      responderModel: draft.responderModel,
+      responderReasoningEffort: draft.responderReasoningEffort,
+      workerGovernanceMode: draft.workerGovernanceMode,
+      verificationCadence: draft.verificationCadence,
+      tokenEfficiencyMode: draft.tokenEfficiencyMode,
+      responderApprovalMode: draft.responderApprovalMode,
+    });
+  };
+
+  const applyRuntimeEdit = (draft: RuntimeEditorDraft) => {
+    const nextResponderProfileName = getDefaultProfileName(draft.responderProvider);
+    setSelectedGuildProvider(draft.workerProvider);
+    setSelectedProfileName(nextResponderProfileName);
+    setSelectedExecutionMode(draft.workerExecutionMode);
+    setSelectedModel(draft.workerModel);
+    setSelectedEffort(draft.workerReasoningEffort);
+    setSelectedResponderModel(draft.responderModel);
+    setSelectedResponderEffort(draft.responderReasoningEffort);
+    setSelectedTuningMode(draft.workerTuningMode);
+    setSelectedWorkerGovernanceMode(draft.workerGovernanceMode);
+    setSelectedVerificationCadence(draft.verificationCadence);
+    setSelectedTokenEfficiencyMode(draft.tokenEfficiencyMode);
+    setSelectedResponderApprovalMode(draft.responderApprovalMode);
+    const { resolvedProfile, runtimeDefaults } = buildRuntimePackage(draft.workerExecutionMode, {
+      ...draft,
+      guildProvider: draft.workerProvider,
+      responderProfileName: nextResponderProfileName,
+    });
     updateRuntime(resolvedProfile, runtimeDefaults);
     setRuntimeEditorOpen(false);
   };
@@ -421,13 +659,26 @@ export function OnboardingScreen({
 
   const runtimePackage = useMemo(
     () => buildRuntimePackage(selectedExecutionMode),
-    [selectedExecutionMode, selectedExecutionMode, selectedEffort, selectedModel, selectedProfileName, selectedProtocol, selectedTuningMode],
+    [
+      selectedExecutionMode,
+      selectedEffort,
+      selectedGuildProvider,
+      selectedModel,
+      selectedProfileName,
+      selectedResponderApprovalMode,
+      selectedResponderEffort,
+      selectedResponderModel,
+      selectedTokenEfficiencyMode,
+      selectedTuningMode,
+      selectedVerificationCadence,
+      selectedWorkerGovernanceMode,
+    ],
   );
   const savedBaselineRuntime = useMemo(
     () => mergeRuntimeSettings(
       selectedExecutionMode === "accelerated"
-        ? getAcceleratedWorkerRuntime(selectedProtocol)
-        : getDefaultOnboardingRuntime(selectedProtocol),
+        ? getAcceleratedWorkerRuntime(selectedGuildProvider)
+        : getDefaultWorkerRuntime(selectedGuildProvider),
       {
         tuningMode: selectedTuningMode,
         model: selectedModel,
@@ -435,7 +686,20 @@ export function OnboardingScreen({
         executionMode: selectedExecutionMode,
       },
     ),
-    [selectedExecutionMode, selectedEffort, selectedModel, selectedProtocol, selectedTuningMode],
+    [selectedExecutionMode, selectedEffort, selectedGuildProvider, selectedModel, selectedTuningMode],
+  );
+  const savedResponderRuntime = useMemo(
+    () => mergeRuntimeSettings(
+      selectedExecutionMode === "accelerated"
+        ? getAcceleratedWorkerRuntime(selectedResponderProtocol)
+        : getDefaultWorkerRuntime(selectedResponderProtocol),
+      {
+        tuningMode: "manual",
+        model: selectedResponderModel,
+        reasoningEffort: selectedResponderEffort,
+      },
+    ),
+    [selectedExecutionMode, selectedResponderEffort, selectedResponderModel, selectedResponderProtocol],
   );
   const setupOrder = getSetupOrder(initialMode, Boolean(dir));
   const stepPosition = Math.max(1, setupOrder.indexOf(step) + 1);
@@ -468,15 +732,15 @@ export function OnboardingScreen({
   };
 
   // ── Directory input ──
-  if (!started) {
+  if (!started && s.status === "idle") {
     return (
       <Box flexDirection="column" padding={1} gap={1}>
         <Panel
           title={initialMode === "refine" ? "Refine Roscoe" : "Train Roscoe"}
           subtitle={
             initialMode === "refine"
-              ? "Keep the locked provider, choose the themes to revisit, and let Roscoe refine the saved understanding without rerunning the full intake"
-              : "Choose the locked provider for this project, then let Roscoe explore the repo and run an intent interview before saving project defaults"
+              ? "Choose the themes to revisit, then run the shared Runtime & Governance wizard before Roscoe refines the saved understanding"
+              : "Choose the project, run the shared Runtime & Governance wizard, then let Roscoe explore the repo and run an intent interview before saving project defaults"
           }
           accentColor="cyan"
           rightLabel={`Step ${stepPosition}/${setupOrder.length}`}
@@ -487,8 +751,14 @@ export function OnboardingScreen({
               <Pill label={selectedRefineThemes.length > 0 ? `${selectedRefineThemes.length} themes` : "themes"} color={selectedRefineThemes.length > 0 ? "yellow" : "gray"} />
             )}
             <RuntimeSummaryPills
-              protocol={selectedProtocol}
-              runtime={runtimePackage.resolvedProfile.runtime}
+              protocol={selectedGuildProvider}
+              responderProvider={selectedResponderProtocol}
+              runtime={savedBaselineRuntime}
+              responderRuntime={runtimePackage.runtimeDefaults.responderByProtocol?.[selectedResponderProtocol]}
+              workerGovernanceMode={selectedWorkerGovernanceMode}
+              verificationCadence={selectedVerificationCadence}
+              tokenEfficiencyMode={selectedTokenEfficiencyMode}
+              responderApprovalMode={selectedResponderApprovalMode}
             />
           </Box>
           {selectedTuningMode === "auto" && (
@@ -497,14 +767,22 @@ export function OnboardingScreen({
                 Current onboarding turn: <Text color="cyan">{runtimePackage.onboardingPlan.summary}</Text>
               </Text>
               <Text dimColor>
-                Saved baseline for future turns: <Text color="magenta">{selectedModel} / {selectedEffort}</Text>
+                Saved Guild baseline: <Text color="yellow">{selectedModel} / {selectedEffort}</Text>
+              </Text>
+              <Text dimColor>
+                Saved Roscoe baseline: <Text color="magenta">{selectedResponderModel} / {selectedResponderEffort}</Text>
               </Text>
               <Text dimColor>{runtimePackage.onboardingPlan.rationale}</Text>
             </Box>
           )}
           <Box marginTop={1}>
             <Text dimColor>
-              Onboarding locks the project to <Text color="cyan">{selectedProtocol}</Text>. Later you can still retune model and reasoning inside that provider or let Roscoe auto-manage them.
+              Roscoe will onboard and draft on <Text color="magenta">{selectedResponderProtocol}</Text>. Future Guild lanes will launch on <Text color="cyan">{selectedGuildProvider}</Text>. The same shared wizard is available later with <Text color="cyan">u</Text>.
+            </Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text dimColor>
+              Execution controls file and network access. Guild check-in mode controls whether workers stop for Roscoe before material changes. Verification cadence controls when the heavy proof stack reruns. Token efficiency controls how hard Roscoe leans on reasoning depth by default. Roscoe approval controls whether Roscoe asks you before replying.
             </Text>
           </Box>
           <Box marginTop={1}>
@@ -520,10 +798,33 @@ export function OnboardingScreen({
 
         {step === "directory" && (
           <Panel title="Project Directory" subtitle="Point the orchestrator at the repo root" accentColor="yellow">
-            <Box>
-              <Text color="yellow">Project directory: </Text>
-              <DirInput onSubmit={handleDirSubmit} />
-            </Box>
+            {pendingDirConfirmation ? (
+              <Box flexDirection="column">
+                <Text color="yellow" bold>Repo root detected for this path:</Text>
+                <Text dimColor>Entered: {pendingDirConfirmation.enteredDir}</Text>
+                <Text dimColor>Repo root: {pendingDirConfirmation.suggestedDir}</Text>
+                <Box marginTop={1}>
+                  <Select
+                    options={[
+                      { label: `Use repo root  ${pendingDirConfirmation.suggestedDir}`, value: "root" },
+                      { label: `Keep entered directory  ${pendingDirConfirmation.enteredDir}`, value: "entered" },
+                    ]}
+                    onChange={(value) => {
+                      acceptDirectory(
+                        value === "root"
+                          ? pendingDirConfirmation.suggestedDir
+                          : pendingDirConfirmation.enteredDir,
+                      );
+                    }}
+                  />
+                </Box>
+              </Box>
+            ) : (
+              <Box>
+                <Text color="yellow">Project directory: </Text>
+                <DirInput onSubmit={handleDirSubmit} />
+              </Box>
+            )}
           </Panel>
         )}
 
@@ -537,77 +838,26 @@ export function OnboardingScreen({
               options={REFINE_THEME_OPTIONS}
               onSubmit={(values) => {
                 setSelectedRefineThemes(values);
-                setStep("model");
+                setStep("runtime");
               }}
             />
           </Panel>
         )}
 
-        {step === "profile" && initialMode === "onboard" && (
-          <Panel title="Roscoe Runtime" subtitle="Choose the provider Roscoe will use. This provider becomes the project lock after onboarding." accentColor="yellow">
-            <Select options={profileItems} onChange={handleProfileSelect} />
-            <Box marginTop={1}>
-              <Text dimColor>
-                Model and reasoning stay editable later. Switching Claude ↔ Codex after onboarding is not allowed for a trained project.
-              </Text>
-            </Box>
-          </Panel>
-        )}
-
-        {step === "model" && (
-          <Panel title="Model" subtitle="Best model is prefilled; submit to keep or replace with a custom model id" accentColor="yellow">
-            <Box>
-              <Text color="yellow">Model: </Text>
-              <TextInput
-                key={modelInputKey}
-                defaultValue={selectedModel}
-                onSubmit={handleModelSubmit}
-              />
-            </Box>
-          </Panel>
-        )}
-
-        {step === "effort" && (
-          <Panel title="Reasoning Effort" subtitle="Tune depth for the onboarding run and save it as the project default" accentColor="yellow">
-            <Select
-              options={effortItems}
-              onChange={(value) => {
-                setSelectedEffort(value);
-                setStep("tuning");
-              }}
-            />
-          </Panel>
-        )}
-
-        {step === "tuning" && (
-          <Panel
-            title="Runtime Management"
-            subtitle="Auto lets Roscoe retune model and reasoning inside the locked provider. Manual pins the chosen settings until you change them."
+        {step === "runtime" && (
+          <RuntimeEditorPanel
+            protocol={selectedGuildProvider}
+            responderProvider={selectedResponderProtocol}
+            allowedProviders={allowedProviders}
+            runtime={savedBaselineRuntime}
+            responderRuntime={savedResponderRuntime}
+            workerGovernanceMode={selectedWorkerGovernanceMode}
+            verificationCadence={selectedVerificationCadence}
+            tokenEfficiencyMode={selectedTokenEfficiencyMode}
+            responderApprovalMode={selectedResponderApprovalMode}
+            onApply={applySetupRuntimeEdit}
             accentColor="yellow"
-          >
-            <Select
-              options={tuningItems}
-              onChange={(value) => {
-                setSelectedTuningMode(value as "manual" | "auto");
-                setStep("execution");
-              }}
-            />
-          </Panel>
-        )}
-
-        {step === "execution" && (
-          <Panel
-            title="Execution Mode"
-            subtitle="Safe autonomous uses provider-safe defaults that keep the agent moving; accelerated relaxes permissions for faster iteration"
-            accentColor={selectedExecutionMode === "accelerated" ? "red" : "green"}
-          >
-            <Select
-              options={executionItems}
-              onChange={(value) => {
-                startConfiguredOnboarding(value as "safe" | "accelerated");
-              }}
-            />
-          </Panel>
+          />
         )}
       </Box>
     );
@@ -621,23 +871,31 @@ export function OnboardingScreen({
           title={initialMode === "refine" ? "Roscoe Refinement" : "Roscoe Onboarding"}
           subtitle={
             initialMode === "refine"
-              ? "Loading the saved brief, then tightening only the chosen themes inside the locked provider"
-              : "Exploring the codebase first, then preparing the intent interview inside the locked provider"
+              ? "Loading the saved brief, then tightening only the chosen themes with the saved Guild and Roscoe defaults"
+              : workspaceAssessment?.mode === "greenfield"
+                ? "Assessing the greenfield workspace first, then preparing a vision-and-architecture interview with the saved Guild and Roscoe defaults"
+                : "Exploring the codebase first, then preparing the intent interview with the saved Guild and Roscoe defaults"
           }
           accentColor="cyan"
           rightLabel={s.toolActivity ? `tool ${s.toolActivity}` : s.status}
         >
-          <RuntimeSummaryPills
-            protocol={selectedProtocol}
-            runtime={runtimePackage.resolvedProfile.runtime}
-          />
+            <RuntimeSummaryPills
+              protocol={selectedGuildProvider}
+              responderProvider={selectedResponderProtocol}
+              runtime={savedBaselineRuntime}
+              responderRuntime={runtimePackage.runtimeDefaults.responderByProtocol?.[selectedResponderProtocol]}
+              workerGovernanceMode={selectedWorkerGovernanceMode}
+              verificationCadence={selectedVerificationCadence}
+              tokenEfficiencyMode={selectedTokenEfficiencyMode}
+              responderApprovalMode={selectedResponderApprovalMode}
+            />
           {selectedTuningMode === "auto" && (
             <Box marginTop={1} flexDirection="column">
               <Text dimColor>
                 Current onboarding turn: <Text color="cyan">{runtimePackage.onboardingPlan.summary}</Text>
               </Text>
               <Text dimColor>
-                Saved baseline: <Text color="magenta">{selectedModel} / {selectedEffort}</Text>
+                Saved Guild baseline: <Text color="yellow">{selectedModel} / {selectedEffort}</Text>
               </Text>
               <Text dimColor>{runtimePackage.onboardingPlan.rationale}</Text>
             </Box>
@@ -647,16 +905,27 @@ export function OnboardingScreen({
           </Box>
           <Box marginTop={1}>
             <Text dimColor>
-              Provider stays on <Text color="cyan">{selectedProtocol}</Text>. Only model and reasoning can change from here.
+              Roscoe is onboarding on <Text color="magenta">{selectedResponderProtocol}</Text>. Future Guild lanes are set to <Text color="cyan">{selectedGuildProvider}</Text>.
             </Text>
           </Box>
+          {initialMode !== "refine" && workspaceAssessment && (
+            <Box marginTop={1}>
+              <Text dimColor>Workspace assessment: {workspaceAssessment.summary}</Text>
+            </Box>
+          )}
         </Panel>
 
         {runtimeEditorOpen && (
           <RuntimeEditorPanel
-            protocol={selectedProtocol}
+            protocol={selectedGuildProvider}
+            responderProvider={selectedResponderProtocol}
+            allowedProviders={allowedProviders}
             runtime={savedBaselineRuntime}
-            scopeLabel="Changes apply to Roscoe's next onboarding turn and the saved project default for this provider."
+            responderRuntime={savedResponderRuntime}
+            workerGovernanceMode={selectedWorkerGovernanceMode}
+            verificationCadence={selectedVerificationCadence}
+            tokenEfficiencyMode={selectedTokenEfficiencyMode}
+            responderApprovalMode={selectedResponderApprovalMode}
             onApply={applyRuntimeEdit}
           />
         )}
@@ -685,7 +954,17 @@ export function OnboardingScreen({
 
         {/* Streaming analysis text with markdown */}
         {s.streamingText && (
-          <Panel title="Live Analysis" subtitle="Repo-grounded intake before the interview" accentColor="gray">
+          <Panel
+            title="Live Analysis"
+            subtitle={
+              initialMode === "refine"
+                ? "Saved-brief refinement before the interview"
+                : workspaceAssessment?.mode === "greenfield"
+                  ? "Vision and scaffold intake before the interview"
+                  : "Repo-grounded intake before the interview"
+            }
+            accentColor="gray"
+          >
             <Text wrap="wrap">{renderMd(s.streamingText)}</Text>
           </Panel>
         )}
@@ -698,7 +977,9 @@ export function OnboardingScreen({
               ? "Starting Roscoe..."
               : initialMode === "refine"
                 ? "Refining the saved project understanding..."
-                : "Exploring the repo..."}
+                : workspaceAssessment?.mode === "greenfield"
+                  ? "Assessing the greenfield workspace..."
+                  : "Exploring the repo..."}
         </Text>
       </Box>
     );
@@ -707,6 +988,7 @@ export function OnboardingScreen({
   // ── Interview (multiple choice) ──
   if (s.status === "interviewing") {
     const options = s.question ? buildOptions(s.question.options) : [];
+    const currentSecretRequest = s.secretRequest;
 
     return (
       <Box flexDirection="column" padding={1} gap={1}>
@@ -714,15 +996,23 @@ export function OnboardingScreen({
           title="Roscoe Intent Interview"
           subtitle={
             initialMode === "refine"
-              ? "Targeted follow-up questions to update the saved brief inside the locked provider"
-              : "Codebase-grounded questions to pin down intent and definition of done inside the locked provider"
+              ? "Targeted follow-up questions to update the saved brief with the saved Guild and Roscoe defaults"
+              : workspaceAssessment?.mode === "greenfield"
+                ? "Vision- and architecture-grounded questions to define the project contract before the build starts"
+                : "Codebase-grounded questions to pin down intent and definition of done with the saved Guild and Roscoe defaults"
           }
           accentColor="cyan"
           rightLabel={`Q${s.qaHistory.length + 1}`}
         >
           <RuntimeSummaryPills
-            protocol={selectedProtocol}
-            runtime={runtimePackage.resolvedProfile.runtime}
+            protocol={selectedGuildProvider}
+            responderProvider={selectedResponderProtocol}
+            runtime={savedBaselineRuntime}
+            responderRuntime={runtimePackage.runtimeDefaults.responderByProtocol?.[selectedResponderProtocol]}
+            workerGovernanceMode={selectedWorkerGovernanceMode}
+            verificationCadence={selectedVerificationCadence}
+            tokenEfficiencyMode={selectedTokenEfficiencyMode}
+            responderApprovalMode={selectedResponderApprovalMode}
           />
           {selectedTuningMode === "auto" && (
             <Box marginTop={1} flexDirection="column">
@@ -730,7 +1020,7 @@ export function OnboardingScreen({
                 Current interview turn: <Text color="cyan">{runtimePackage.onboardingPlan.summary}</Text>
               </Text>
               <Text dimColor>
-                Saved baseline: <Text color="magenta">{selectedModel} / {selectedEffort}</Text>
+                Saved Guild baseline: <Text color="yellow">{selectedModel} / {selectedEffort}</Text>
               </Text>
             </Box>
           )}
@@ -739,16 +1029,22 @@ export function OnboardingScreen({
           </Box>
           <Box marginTop={1}>
             <Text dimColor>
-              Roscoe may retune model and reasoning inside <Text color="cyan">{selectedProtocol}</Text>, but this project will not switch providers after onboarding.
+              Roscoe is interviewing on <Text color="magenta">{selectedResponderProtocol}</Text>. Future Guild lanes are set to <Text color="cyan">{selectedGuildProvider}</Text>.
             </Text>
           </Box>
         </Panel>
 
         {runtimeEditorOpen && (
           <RuntimeEditorPanel
-            protocol={selectedProtocol}
+            protocol={selectedGuildProvider}
+            responderProvider={selectedResponderProtocol}
+            allowedProviders={allowedProviders}
             runtime={savedBaselineRuntime}
-            scopeLabel="Changes apply to Roscoe's next interview turn and the saved project default for this provider."
+            responderRuntime={savedResponderRuntime}
+            workerGovernanceMode={selectedWorkerGovernanceMode}
+            verificationCadence={selectedVerificationCadence}
+            tokenEfficiencyMode={selectedTokenEfficiencyMode}
+            responderApprovalMode={selectedResponderApprovalMode}
             onApply={applyRuntimeEdit}
           />
         )}
@@ -769,8 +1065,50 @@ export function OnboardingScreen({
           </Panel>
         )}
 
+        {currentSecretRequest && (
+          <Panel
+            title={`Secure Secret ${s.qaHistory.length + 1}`}
+            subtitle={currentSecretRequest.purpose}
+            accentColor="yellow"
+          >
+            <Box marginBottom={1} flexDirection="column">
+              <Text bold>{currentSecretRequest.label}</Text>
+              <Text dimColor>
+                Roscoe needs <Text color="cyan">{currentSecretRequest.key}</Text> and will save it to <Text color="magenta">{currentSecretRequest.targetFile}</Text>.
+                {currentSecretRequest.required ? " This is marked as required." : " This can be skipped for now."}
+              </Text>
+            </Box>
+
+            {currentSecretRequest.instructions.length > 0 && (
+              <Box marginBottom={1} flexDirection="column">
+                <Text color="yellow">How to get it</Text>
+                {currentSecretRequest.instructions.map((instruction, index) => (
+                  <Text key={`${currentSecretRequest.key}-instruction-${index}`} dimColor>{index + 1}. {instruction}</Text>
+                ))}
+              </Box>
+            )}
+
+            {currentSecretRequest.links.length > 0 && (
+              <Box marginBottom={1} flexDirection="column">
+                <Text color="yellow">Official links</Text>
+                {currentSecretRequest.links.map((link, index) => (
+                  <Text key={`${currentSecretRequest.key}-link-${index}`} dimColor>
+                    {link.label}: {link.url}
+                  </Text>
+                ))}
+              </Box>
+            )}
+
+            <SecretInput
+              request={currentSecretRequest}
+              onSubmit={(value) => sendSecretInput(currentSecretRequest, value)}
+              onSkip={() => skipSecretInput(currentSecretRequest)}
+            />
+          </Panel>
+        )}
+
         {/* Current question with Select */}
-        {s.question && !freeTextMode && s.question.selectionMode === "single" && (
+        {s.question && !s.secretRequest && !freeTextMode && s.question.selectionMode === "single" && (
           <Panel
             title={`Question ${s.qaHistory.length + 1}`}
             subtitle={s.question.purpose ?? "Pick the closest answer or choose Other"}
@@ -790,7 +1128,7 @@ export function OnboardingScreen({
           </Panel>
         )}
 
-        {s.question && !freeTextMode && s.question.selectionMode === "multi" && (
+        {s.question && !s.secretRequest && !freeTextMode && s.question.selectionMode === "multi" && (
           <Panel
             title={`Question ${s.qaHistory.length + 1}`}
             subtitle={s.question.purpose ?? "Choose all answers that apply"}
@@ -811,7 +1149,7 @@ export function OnboardingScreen({
         )}
 
         {/* Free text input for "Other" */}
-        {freeTextMode && (
+        {freeTextMode && !s.secretRequest && (
           <Panel
             title={`Question ${s.qaHistory.length + 1}`}
             subtitle={s.question?.purpose ?? "Free-form answer"}
@@ -840,7 +1178,7 @@ export function OnboardingScreen({
         )}
 
         {/* No question parsed — fallback to text input */}
-        {!s.question && !freeTextMode && (
+        {!s.question && !s.secretRequest && !freeTextMode && (
           <Panel title="Reply" subtitle="Fallback text input" accentColor="yellow">
             <Box>
               <Text color="yellow">Your input: </Text>
@@ -873,13 +1211,18 @@ export function OnboardingScreen({
           </Panel>
         )}
         <Panel title="Onboarding Complete" subtitle="Project memory has been written" accentColor="green">
-          <Box gap={1}>
+          <Box gap={1} flexWrap="wrap">
             {s.projectContext && <Pill label={s.projectContext.name} color="green" />}
+            {s.projectContext && <Pill label={formatWorkerGovernanceLabel(getWorkerGovernanceMode(s.projectContext))} color="cyan" />}
+            {s.projectContext && <Pill label={formatResponderApprovalLabel(getResponderApprovalMode(s.projectContext) ?? "auto")} color="green" />}
             <Text>
               {s.projectContext
                 ? `Roscoe is trained on "${s.projectContext.name}" and ready to guide Guild sessions. Returning to home...`
                 : "Project registered. Returning to home..."}
             </Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text dimColor>Later, start a Guild lane and press <Text color="cyan">u</Text> to adjust runtime, Guild check-ins, or when Roscoe asks you.</Text>
           </Box>
         </Panel>
       </Box>

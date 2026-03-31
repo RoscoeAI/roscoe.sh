@@ -15,6 +15,7 @@ describe("RoscoeIntro", () => {
   it("builds a stamped wordmark as the name reveals", () => {
     const partial = buildRoscoeWordmark(2).join("\n");
     const full = buildRoscoeWordmark(7).join("\n");
+    const spinning = buildRoscoeWordmark(1, 2).join("\n");
 
     expect(partial).toContain("RRRR");
     expect(partial).toContain("OOO");
@@ -23,11 +24,13 @@ describe("RoscoeIntro", () => {
     expect(full).toContain("CCCC");
     expect(full).toContain("EEEEE");
     expect(full).not.toContain(".");
+    expect(spinning).toContain("|====|");
   });
 
   it("animates telegraph pulse rails", () => {
     expect(buildPulseRail(12, 0)).toContain("o");
     expect(buildPulseRail(12, 6)).not.toBe(buildPulseRail(12, 0));
+    expect(buildPulseRail(2, 0).length).toBeGreaterThanOrEqual(6);
   });
 
   it("reveals Roscoe and waits for any key to continue", async () => {
@@ -49,5 +52,31 @@ describe("RoscoeIntro", () => {
 
     app.stdin.write("x");
     expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores ctrl/meta shortcuts and only finishes once", async () => {
+    const onDone = vi.fn();
+    const app = render(<RoscoeIntro onDone={onDone} />);
+
+    app.stdin.write("\u0003");
+    expect(onDone).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(100);
+    app.stdin.write("\u001B[A");
+    expect(onDone).toHaveBeenCalledTimes(1);
+
+    app.stdin.write("x");
+    expect(onDone).toHaveBeenCalledTimes(1);
+
+    app.unmount();
+  });
+
+  it("cleans up the animation interval on unmount", () => {
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+    const app = render(<RoscoeIntro onDone={vi.fn()} />);
+
+    app.unmount();
+
+    expect(clearIntervalSpy).toHaveBeenCalled();
   });
 });

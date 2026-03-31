@@ -1,0 +1,4 @@
+dist/**/*.test.js
+dist/**/*.test.d.ts
+dist/**/*.e2e.test.js
+dist/**/*.e2e.test.d.ts

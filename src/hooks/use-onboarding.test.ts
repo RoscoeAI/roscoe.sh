@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { appendStreamingChunk, formatOnboardingExitError, parseQuestion, cleanStreamingText } from "./use-onboarding.js";
+import { appendStreamingChunk, formatOnboardingExitError, parseQuestion, parseSecretRequest, cleanStreamingText } from "./use-onboarding.js";
 
 describe("parseQuestion", () => {
   it("parses valid question block", () => {
@@ -52,17 +52,44 @@ describe("cleanStreamingText", () => {
   });
 
   it("removes multiple blocks", () => {
-    const text = 'Before\n---QUESTION---\nq\n---END_QUESTION---\nMiddle\n---BRIEF---\nb\n---END_BRIEF---\nAfter';
+    const text = 'Before\n---QUESTION---\nq\n---END_QUESTION---\nMiddle\n---SECRET---\ns\n---END_SECRET---\nAfter\n---BRIEF---\nb\n---END_BRIEF---';
     const result = cleanStreamingText(text);
     expect(result).toContain("Before");
     expect(result).toContain("Middle");
     expect(result).toContain("After");
     expect(result).not.toContain("QUESTION");
+    expect(result).not.toContain("SECRET");
     expect(result).not.toContain("BRIEF");
   });
 
   it("trims the result", () => {
     expect(cleanStreamingText("  text  ")).toBe("text");
+  });
+});
+
+describe("parseSecretRequest", () => {
+  it("parses a valid secret block", () => {
+    const text = `Need one credential next.
+
+---SECRET---
+{"key":"CLOUDFLARE_API_TOKEN","label":"Cloudflare API token","purpose":"Needed to create preview infrastructure.","instructions":["Open the Cloudflare dashboard.","Create a scoped token."],"links":[{"label":"Dashboard","url":"https://dash.cloudflare.com/profile/api-tokens"}],"required":true,"targetFile":".env.local"}
+---END_SECRET---`;
+
+    const result = parseSecretRequest(text);
+    expect(result).toEqual({
+      key: "CLOUDFLARE_API_TOKEN",
+      label: "Cloudflare API token",
+      purpose: "Needed to create preview infrastructure.",
+      instructions: ["Open the Cloudflare dashboard.", "Create a scoped token."],
+      links: [{ label: "Dashboard", url: "https://dash.cloudflare.com/profile/api-tokens" }],
+      required: true,
+      targetFile: ".env.local",
+    });
+  });
+
+  it("returns null for malformed or missing secret blocks", () => {
+    expect(parseSecretRequest("plain text")).toBeNull();
+    expect(parseSecretRequest("---SECRET---\nnot json\n---END_SECRET---")).toBeNull();
   });
 });
 

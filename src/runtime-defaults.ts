@@ -1,8 +1,16 @@
-import { ProjectContext } from "./config.js";
+import {
+  ProjectContext,
+  ResponderApprovalMode,
+  TokenEfficiencyMode,
+  VerificationCadence,
+  WorkerGovernanceMode,
+} from "./config.js";
 import {
   detectProtocol,
+  getProviderAdapter,
   HeadlessProfile,
   LLMProtocol,
+  RuntimeExecutionMode,
   RuntimeControlSettings,
   RuntimeTuningMode,
   summarizeRuntime,
@@ -23,70 +31,47 @@ export function getRuntimeTuningMode(
 }
 
 export function getTopModel(protocol: LLMProtocol): string {
-  return protocol === "claude" ? "claude-opus-4-6" : "gpt-5.4";
+  return getProviderAdapter(protocol).topModel;
+}
+
+export function getDefaultProfileName(protocol: LLMProtocol): string {
+  return getProviderAdapter(protocol).defaultProfileName;
 }
 
 export function getDefaultWorkerRuntime(protocol: LLMProtocol): RuntimeControlSettings {
-  if (protocol === "claude") {
-    return {
-      executionMode: "safe",
-      tuningMode: "auto",
-      model: getTopModel("claude"),
-      reasoningEffort: "high",
-      permissionMode: "auto",
-    };
-  }
-
-  return {
-    executionMode: "safe",
-    tuningMode: "auto",
-    model: getTopModel("codex"),
-    reasoningEffort: "xhigh",
-    sandboxMode: "workspace-write",
-    approvalPolicy: "never",
-  };
+  return { ...getProviderAdapter(protocol).defaultWorkerRuntime };
 }
 
 export function getAcceleratedWorkerRuntime(protocol: LLMProtocol): RuntimeControlSettings {
-  if (protocol === "claude") {
-    return {
-      executionMode: "accelerated",
-      tuningMode: "auto",
-      model: getTopModel("claude"),
-      reasoningEffort: "high",
-      dangerouslySkipPermissions: true,
-    };
-  }
+  return { ...getProviderAdapter(protocol).acceleratedWorkerRuntime };
+}
 
-  return {
-    executionMode: "accelerated",
-    tuningMode: "auto",
-    model: getTopModel("codex"),
-    reasoningEffort: "xhigh",
-    sandboxMode: "danger-full-access",
-    approvalPolicy: "never",
-  };
+export function getRuntimeBaseForExecutionMode(
+  protocol: LLMProtocol,
+  executionMode: RuntimeExecutionMode,
+): RuntimeControlSettings {
+  return executionMode === "accelerated"
+    ? getAcceleratedWorkerRuntime(protocol)
+    : getDefaultWorkerRuntime(protocol);
+}
+
+export function buildConfiguredRuntime(
+  protocol: LLMProtocol,
+  executionMode: RuntimeExecutionMode,
+  tuningMode: RuntimeTuningMode,
+  model?: string,
+  reasoningEffort?: string,
+): RuntimeControlSettings {
+  return mergeRuntimeSettings(
+    getRuntimeBaseForExecutionMode(protocol, executionMode),
+    { executionMode, tuningMode },
+    model ? { model } : undefined,
+    reasoningEffort ? { reasoningEffort } : undefined,
+  );
 }
 
 export function getDefaultOnboardingRuntime(protocol: LLMProtocol): RuntimeControlSettings {
-  if (protocol === "claude") {
-    return {
-      executionMode: "safe",
-      tuningMode: "auto",
-      model: getTopModel("claude"),
-      reasoningEffort: "max",
-      permissionMode: "auto",
-    };
-  }
-
-  return {
-    executionMode: "safe",
-    tuningMode: "auto",
-    model: getTopModel("codex"),
-    reasoningEffort: "xhigh",
-    sandboxMode: "workspace-write",
-    approvalPolicy: "never",
-  };
+  return { ...getProviderAdapter(protocol).defaultOnboardingRuntime };
 }
 
 export function mergeRuntimeSettings(
@@ -123,18 +108,103 @@ export function getProjectWorkerRuntime(
   return context?.runtimeDefaults?.workerByProtocol?.[protocol] ?? null;
 }
 
-export function getLockedProjectProvider(context: ProjectContext | null): LLMProtocol | null {
+export function getProjectResponderRuntime(
+  context: ProjectContext | null,
+  protocol: LLMProtocol,
+): RuntimeControlSettings | null {
+  return context?.runtimeDefaults?.responderByProtocol?.[protocol] ?? null;
+}
+
+export function getGuildProvider(context: ProjectContext | null): LLMProtocol | null {
+  if (context?.runtimeDefaults?.guildProvider) {
+    return context.runtimeDefaults.guildProvider;
+  }
+
   if (context?.runtimeDefaults?.lockedProvider) {
     return context.runtimeDefaults.lockedProvider;
   }
 
   const onboardingProfile = context?.runtimeDefaults?.onboarding?.profileName?.toLowerCase();
   if (!onboardingProfile) return null;
-  return onboardingProfile.includes("codex") ? "codex" : "claude";
+  return detectProtocol({
+    name: onboardingProfile,
+    command: onboardingProfile,
+  });
+}
+
+export function getResponderProvider(context: ProjectContext | null): LLMProtocol | null {
+  if (context?.runtimeDefaults?.responderProvider) {
+    return context.runtimeDefaults.responderProvider;
+  }
+
+  return getGuildProvider(context);
+}
+
+export function getWorkerGovernanceMode(context: ProjectContext | null): WorkerGovernanceMode {
+  return context?.runtimeDefaults?.workerGovernanceMode === "guild-autonomous"
+    ? "guild-autonomous"
+    : "roscoe-arbiter";
+}
+
+export function getResponderApprovalMode(context: ProjectContext | null): ResponderApprovalMode | null {
+  return context?.runtimeDefaults?.responderApprovalMode === "manual"
+    ? "manual"
+    : context?.runtimeDefaults?.responderApprovalMode === "auto"
+      ? "auto"
+      : null;
+}
+
+export function getVerificationCadence(context: ProjectContext | null): VerificationCadence {
+  return context?.runtimeDefaults?.verificationCadence === "prove-each-slice"
+    ? "prove-each-slice"
+    : "batched";
+}
+
+export function getTokenEfficiencyMode(context: ProjectContext | null): TokenEfficiencyMode {
+  return context?.runtimeDefaults?.tokenEfficiencyMode === "balanced"
+    ? "balanced"
+    : "save-tokens";
+}
+
+export function formatWorkerGovernanceLabel(mode: WorkerGovernanceMode): string {
+  return mode === "guild-autonomous" ? "Guild direct" : "Roscoe arbiter";
+}
+
+export function formatVerificationCadenceLabel(mode: VerificationCadence): string {
+  return mode === "prove-each-slice" ? "prove each slice" : "batch proofs";
+}
+
+export function formatResponderApprovalLabel(mode: ResponderApprovalMode): string {
+  return mode === "manual" ? "always ask" : "auto when confident";
+}
+
+export function formatTokenEfficiencyLabel(mode: TokenEfficiencyMode): string {
+  return mode === "save-tokens" ? "save tokens" : "balanced";
+}
+
+export function describeWorkerGovernance(mode: WorkerGovernanceMode): string {
+  return mode === "guild-autonomous"
+    ? "Guild workers can act directly inside the brief and only check in with Roscoe on ambiguity, blockers, or explicit risk boundaries."
+    : "Guild workers keep their configured access, but they stop at material changes so Roscoe can approve, reshape, or hold the next move.";
+}
+
+export function describeVerificationCadence(mode: VerificationCadence): string {
+  return mode === "prove-each-slice"
+    ? "Rerun the canonical repo-wide proof stack after each focused slice is ready to verify."
+    : "Use narrow checks while editing, and save the heavy repo-wide proof stack for meaningful checkpoints, before handoff, or when a fresh global read is needed.";
+}
+
+export function getLockedProjectProvider(context: ProjectContext | null): LLMProtocol | null {
+  return getGuildProvider(context);
 }
 
 export function getExecutionModeLabel(runtime: RuntimeControlSettings | null | undefined): string {
-  return runtime?.executionMode === "accelerated" ? "accelerated" : "safe";
+  return runtime?.executionMode === "accelerated"
+    || runtime?.sandboxMode === "danger-full-access"
+    || runtime?.dangerouslySkipPermissions
+    || runtime?.bypassApprovalsAndSandbox
+    ? "accelerated"
+    : "safe";
 }
 
 export function getWorkerProfileForProject(
@@ -157,18 +227,28 @@ export function getWorkerProfileForProject(
   );
 }
 
+export function getResponderProfileForProject(
+  baseProfile: HeadlessProfile,
+  context: ProjectContext | null,
+): HeadlessProfile {
+  const protocol = detectProtocol(baseProfile);
+  const responderRuntime = getProjectResponderRuntime(context, protocol);
+  return applyRuntimeSettings(baseProfile, responderRuntime);
+}
+
 function getDefaultEffort(protocol: LLMProtocol): string {
-  return protocol === "claude" ? "high" : "xhigh";
+  return getProviderAdapter(protocol).defaultReasoningEffort;
 }
 
 function buildOnboardingRuntimePlan(
   baseProfile: HeadlessProfile,
 ): RuntimePlan {
   const protocol = detectProtocol(baseProfile);
+  const adapter = getProviderAdapter(protocol);
   const tuningMode = getRuntimeTuningMode(baseProfile.runtime);
-  const topModel = getTopModel(protocol);
+  const topModel = adapter.topModel;
   const configuredModel = baseProfile.runtime?.model || topModel;
-  const configuredEffort = baseProfile.runtime?.reasoningEffort || (protocol === "claude" ? "max" : "xhigh");
+  const configuredEffort = baseProfile.runtime?.reasoningEffort || adapter.onboardingReasoningEffort;
 
   if (tuningMode === "manual") {
     const profile = applyRuntimeSettings(baseProfile, {
@@ -189,7 +269,7 @@ function buildOnboardingRuntimePlan(
   const profile = applyRuntimeSettings(baseProfile, {
     tuningMode,
     model: topModel,
-    reasoningEffort: protocol === "claude" ? "max" : "xhigh",
+    reasoningEffort: adapter.onboardingReasoningEffort,
   });
 
   return {
@@ -205,10 +285,12 @@ function buildRuntimePlan(
   baseProfile: HeadlessProfile,
   conversationContext: string,
   projectContext: ProjectContext | null,
+  role: "guild" | "roscoe",
 ): RuntimePlan {
   const protocol = detectProtocol(baseProfile);
+  const adapter = getProviderAdapter(protocol);
   const tuningMode = getRuntimeTuningMode(baseProfile.runtime);
-  const topModel = getTopModel(protocol);
+  const topModel = adapter.topModel;
   const configuredModel = baseProfile.runtime?.model || topModel;
   const configuredEffort = baseProfile.runtime?.reasoningEffort || getDefaultEffort(protocol);
 
@@ -242,18 +324,34 @@ function buildRuntimePlan(
   }
 
   const model = frontendHint ? configuredModel : topModel;
+  const tokenEfficiencyMode = getTokenEfficiencyMode(projectContext);
+  const responderEfficient = role === "roscoe" && tokenEfficiencyMode === "save-tokens";
   const reasoningEffort = frontendHint
-    ? "medium"
+    ? (responderEfficient ? adapter.efficientFrontendReasoningEffort : adapter.frontendReasoningEffort)
     : deepHint
-      ? (protocol === "claude" ? "max" : "xhigh")
-      : (protocol === "claude" ? "high" : "xhigh");
+      ? responderEfficient
+        ? adapter.efficientDeepReasoningEffort
+        : adapter.deepReasoningEffort
+      : responderEfficient
+        ? adapter.efficientGeneralReasoningEffort
+        : adapter.generalReasoningEffort;
 
-  const strategy = frontendHint ? "auto-frontend" : deepHint ? "auto-deep-analysis" : "auto-top-tier";
-  const rationale = frontendHint
-    ? "Lower reasoning keeps UI and iteration loops moving faster while staying inside the locked provider."
+  const strategy = frontendHint
+    ? responderEfficient ? "auto-efficient-frontend" : "auto-frontend"
     : deepHint
-      ? `High-complexity work benefits from maximum reasoning depth, so Roscoe steps up to ${topModel} when needed.`
-      : "Defaulting to the strongest in-provider model and high reasoning for general coding work.";
+      ? responderEfficient ? "auto-efficient-analysis" : "auto-deep-analysis"
+      : responderEfficient ? "auto-efficient-general" : "auto-top-tier";
+  const rationale = frontendHint
+    ? responderEfficient
+      ? "Roscoe stays deliberately lighter on clear UI work to conserve tokens while keeping iteration tight."
+      : "Lower reasoning keeps UI and iteration loops moving faster while staying inside the locked provider."
+    : deepHint
+      ? responderEfficient
+        ? `Roscoe keeps reasoning high but not maximum to conserve tokens until the transcript proves extra depth is necessary.`
+        : `High-complexity work benefits from maximum reasoning depth, so Roscoe steps up to ${topModel} when needed.`
+      : responderEfficient
+        ? "Roscoe keeps general coding replies lighter by default so the Guild can spend the heavier reasoning budget on execution."
+        : "Defaulting to the strongest in-provider model and high reasoning for general coding work.";
 
   const profile = applyRuntimeSettings(baseProfile, {
     tuningMode,
@@ -275,7 +373,7 @@ export function recommendResponderRuntime(
   conversationContext: string,
   projectContext: ProjectContext | null,
 ): RuntimePlan {
-  return buildRuntimePlan(baseProfile, conversationContext, projectContext);
+  return buildRuntimePlan(getResponderProfileForProject(baseProfile, projectContext), conversationContext, projectContext, "roscoe");
 }
 
 export function recommendWorkerRuntime(
@@ -283,7 +381,7 @@ export function recommendWorkerRuntime(
   conversationContext: string,
   projectContext: ProjectContext | null,
 ): RuntimePlan {
-  return buildRuntimePlan(baseProfile, conversationContext, projectContext);
+  return buildRuntimePlan(baseProfile, conversationContext, projectContext, "guild");
 }
 
 export function recommendOnboardingRuntime(

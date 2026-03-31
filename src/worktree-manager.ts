@@ -10,6 +10,7 @@ import {
 import { join, resolve, basename, dirname } from "path";
 import {
   getProjectMemoryDir,
+  resolveProjectRoot,
   resolveProjectMemoryDir,
 } from "./config.js";
 
@@ -27,7 +28,7 @@ export class WorktreeManager {
   private projectName: string;
 
   constructor(private projectDir: string) {
-    this.projectDir = resolve(projectDir);
+    this.projectDir = resolveProjectRoot(resolve(projectDir));
     this.projectName = basename(this.projectDir);
   }
 
@@ -168,7 +169,7 @@ export class WorktreeManager {
    * Get the list of config files to copy: .env variants + custom list.
    */
   private getFilesToCopy(): string[] {
-    const files = [".env", ".env.local", ".env.development.local"];
+    const files = [".env", ".env.local", ".env.development.local", ".env.roscoe.local"];
 
     // Check for custom copy list
     const copyListPath = join(resolveProjectMemoryDir(this.projectDir), "copy-files.json");

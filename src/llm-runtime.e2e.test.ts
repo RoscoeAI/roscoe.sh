@@ -20,17 +20,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FIXTURE_PATH = join(__dirname, "..", "test", "fixtures", "mock-llm-cli.mjs");
 
-type MockProvider = "claude" | "codex";
+type MockProvider = "claude" | "codex" | "gemini";
 
 interface MockCall {
   provider: MockProvider;
   promptIncludes?: string;
+  promptIncludesAll?: string[];
+  promptExcludesAll?: string[];
   resumeId?: string;
   sessionId?: string;
   text?: string | string[];
   resultText?: string;
   thinking?: string;
   toolActivity?: string;
+  toolParameters?: Record<string, unknown>;
   stderr?: string;
   exitCode?: number;
 }
@@ -38,6 +41,7 @@ interface MockCall {
 interface MockEnv {
   claudeCommand: string;
   codexCommand: string;
+  geminiCommand: string;
   logPath: string;
   projectDir: string;
   restore: () => void;
@@ -171,12 +175,76 @@ describe.sequential("provider e2e", () => {
     }
   });
 
+  it("monitors a Gemini-style session across resumed turns", async () => {
+    const env = createMockEnv([
+      {
+        provider: "gemini",
+        promptIncludes: "hello gemini",
+        sessionId: "gemini-session-1",
+        toolActivity: "list_directory",
+        toolParameters: { dir_path: "." },
+        text: ["First gemini ", "turn"],
+      },
+      {
+        provider: "gemini",
+        promptIncludes: "continue gemini",
+        resumeId: "gemini-session-1",
+        sessionId: "gemini-session-1",
+        text: "Second gemini turn",
+      },
+    ]);
+
+    try {
+      const monitor = new SessionMonitor(
+        "worker-gemini",
+        makeProfile("gemini", env.geminiCommand),
+        env.projectDir,
+      );
+
+      const tools: string[] = [];
+      const textChunks: string[] = [];
+      monitor.on("tool-activity", (toolName) => {
+        tools.push(toolName);
+      });
+      monitor.on("text", (chunk) => {
+        textChunks.push(chunk);
+      });
+
+      const firstTurn = once(monitor, "turn-complete");
+      monitor.startTurn("hello gemini");
+      await firstTurn;
+
+      expect(monitor.getSessionId()).toBe("gemini-session-1");
+      expect(textChunks.join("")).toContain("First gemini turn");
+      expect(tools).toEqual(["list_directory"]);
+
+      monitor.clearTextBuffer();
+
+      const secondTurn = once(monitor, "turn-complete");
+      monitor.sendFollowUp("continue gemini");
+      await secondTurn;
+
+      expect(monitor.getTextBuffer()).toBe("Second gemini turn");
+
+      const calls = readInvocationLog(env.logPath);
+      expect(calls).toHaveLength(2);
+      expect(calls[1].resumeId).toBe("gemini-session-1");
+    } finally {
+      env.restore();
+    }
+  });
+
   it.each([
     {
       provider: "claude" as const,
       call: {
         provider: "claude" as const,
-        promptIncludes: "Respond in this EXACT JSON format",
+        promptIncludesAll: [
+          "This is the persistent hidden Roscoe responder thread",
+          "Respond in this EXACT JSON format",
+          "User: hello",
+        ],
+        sessionId: "claude-roscoe-1",
         text: [
           '{"message":"Ship it","confidence":88,',
           '"reasoning":"clear next step","browserActions":[{"type":"snapshot","params":{},"description":"inspect"}]}',
@@ -187,8 +255,26 @@ describe.sequential("provider e2e", () => {
       provider: "codex" as const,
       call: {
         provider: "codex" as const,
-        promptIncludes: "Respond in this EXACT JSON format",
+        promptIncludesAll: [
+          "This is the persistent hidden Roscoe responder thread",
+          "Respond in this EXACT JSON format",
+          "User: hello",
+        ],
+        sessionId: "codex-roscoe-1",
         text: '{"message":"Ship it","confidence":88,"reasoning":"clear next step","browserActions":[{"type":"snapshot","params":{},"description":"inspect"}]}',
+      },
+    },
+    {
+      provider: "gemini" as const,
+      call: {
+        provider: "gemini" as const,
+        promptIncludesAll: [
+          "This is the persistent hidden Roscoe responder thread",
+          "Respond in this EXACT JSON format",
+          "User: hello",
+        ],
+        sessionId: "gemini-roscoe-1",
+        text: ['{"message":"Ship it","confidence":88,"reasoning":"clear next step","browserActions":[{"type":"snapshot","params":{},"description":"inspect"}]}'],
       },
     },
   ])("generates suggestions through the %s runtime", async ({ provider, call }) => {
@@ -199,7 +285,12 @@ describe.sequential("provider e2e", () => {
       const partials: string[] = [];
       const profile = makeProfile(
         provider,
-        provider === "claude" ? env.claudeCommand : env.codexCommand,
+        provider === "claude" ? env.claudeCommand : provider === "codex" ? env.codexCommand : env.geminiCommand,
+      );
+      const responderMonitor = new SessionMonitor(
+        `responder-${provider}`,
+        profile,
+        env.projectDir,
       );
 
       const result = await generator.generateSuggestion(
@@ -212,6 +303,11 @@ describe.sequential("provider e2e", () => {
           projectDir: env.projectDir,
           worktreePath: env.projectDir,
           worktreeName: "main",
+          responderMonitor,
+          responderHistory: [
+            { role: "assistant", content: "hi", timestamp: 1 },
+          ],
+          responderHistoryCursor: 0,
         },
         (partial) => {
           partials.push(partial);
@@ -226,9 +322,9 @@ describe.sequential("provider e2e", () => {
     } finally {
       env.restore();
     }
-  });
+  }, 15_000);
 
-  it.each(["claude", "codex"] as const)("onboards a project with %s", async (provider) => {
+  it.each(["claude", "codex", "gemini"] as const)("onboards a project with %s", async (provider) => {
     const env = createMockEnv(buildOnboardingScenario(provider));
 
     const previousHome = process.env.HOME;
@@ -240,7 +336,7 @@ describe.sequential("provider e2e", () => {
 
       const profile = makeProfile(
         provider,
-        provider === "claude" ? env.claudeCommand : env.codexCommand,
+        provider === "claude" ? env.claudeCommand : provider === "codex" ? env.codexCommand : env.geminiCommand,
       );
       const onboarder = new Onboarder(env.projectDir, false, profile);
 
@@ -357,6 +453,7 @@ function createMockEnv(calls: MockCall[]): MockEnv {
   return {
     claudeCommand: createWrapper(root, "claude", scenarioPath, statePath, logPath),
     codexCommand: createWrapper(root, "codex", scenarioPath, statePath, logPath),
+    geminiCommand: createWrapper(root, "gemini", scenarioPath, statePath, logPath),
     logPath,
     projectDir,
     restore: () => {},

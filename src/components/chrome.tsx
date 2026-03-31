@@ -6,6 +6,7 @@ interface PanelProps extends Omit<React.ComponentProps<typeof Box>, "children"> 
   subtitle?: string;
   accentColor?: string;
   rightLabel?: string;
+  bodyFlexGrow?: boolean;
   children: React.ReactNode;
 }
 
@@ -14,6 +15,7 @@ export function Panel({
   subtitle,
   accentColor = "cyan",
   rightLabel,
+  bodyFlexGrow = false,
   children,
   ...boxProps
 }: PanelProps) {
@@ -35,7 +37,7 @@ export function Panel({
       {subtitle && (
         <Text dimColor wrap="wrap">{subtitle}</Text>
       )}
-      <Box marginTop={subtitle ? 1 : 0} flexDirection="column">
+      <Box marginTop={subtitle ? 1 : 0} flexDirection="column" flexGrow={bodyFlexGrow ? 1 : 0}>
         {children}
       </Box>
     </Box>

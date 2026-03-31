@@ -1,27 +1,38 @@
 {
-  "name": "roscoe",
-  "version": "0.1.0",
+  "name": "@roscoesh/cli",
+  "version": "0.1.1",
   "description": "AI co-pilot that monitors concurrent LLM conversations and suggests replies",
   "type": "module",
   "main": "dist/index.js",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts",
+    "!dist/**/*.e2e.test.js",
+    "!dist/**/*.e2e.test.d.ts",
+    "profiles/**/*.json",
+    "sidecar-prompt.md"
+  ],
   "bin": {
-    "roscoe": "./dist/index.js"
+    "roscoe": "dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc",
     "lint": "eslint src",
     "lint:fix": "npm run lint -- --fix",
-    "site:dev": "npm --prefix site run dev",
-    "site:build": "npm --prefix site run build",
-    "site:test": "npm --prefix site run test",
-    "site:lint": "npm --prefix site run lint",
     "start": "tsx src/index.ts",
     "dev": "tsx src/index.ts start claude-code",
     "dev:sms-webhook-tunnel": "sh -c 'cloudflared tunnel --config \"${ROSCOE_CLOUDFLARED_CONFIG:-$HOME/.cloudflared/roscoe-sms-dev.yml}\" run \"${ROSCOE_CLOUDFLARED_TUNNEL:-roscoe-sms-dev}\"'",
     "profiles": "tsx src/index.ts profiles",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "coverage:summary": "node scripts/coverage-summary.mjs",
+    "coverage:check": "node scripts/coverage-check.mjs"
   },
   "keywords": [
     "llm",
@@ -30,7 +41,12 @@
     "terminal"
   ],
   "author": "",
-  "license": "ISC",
+  "homepage": "https://roscoe.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RoscoeAI/roscoe.sh.git"
+  },
+  "license": "Apache-2.0",
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
     "@types/react": "^19.2.14",
@@ -39,11 +55,13 @@
     "ink": "^6.8.0",
     "marked": "^17.0.4",
     "marked-terminal": "^7.3.0",
-    "react": "^19.2.4"
+    "react": "^19.2.4",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.4.0",
+    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^10.1.0",
     "eslint-plugin-react-hooks": "^7.0.1",

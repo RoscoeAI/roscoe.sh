@@ -14,7 +14,11 @@ if (!provider || !scenarioPath || !statePath) {
 }
 
 const scenario = JSON.parse(readFileSync(scenarioPath, "utf-8"));
-const parsed = provider === "codex" ? parseCodexArgs(args) : parseClaudeArgs(args);
+const parsed = provider === "codex"
+  ? parseCodexArgs(args)
+  : provider === "gemini"
+    ? parseGeminiArgs(args)
+    : parseClaudeArgs(args);
 const { callIndex, call } = await reserveMatchingCallIndex(
   scenario.calls || [],
   statePath,
@@ -50,10 +54,14 @@ if (call.stderr) {
 
 await sleep(call.delayMs || 0);
 
-if (provider === "codex") {
-  await emitCodex(call, callIndex);
-} else {
-  await emitClaude(call, callIndex);
+if (!shouldSkipTurnOutput(call)) {
+  if (provider === "codex") {
+    await emitCodex(call, callIndex);
+  } else if (provider === "gemini") {
+    await emitGemini(call, callIndex);
+  } else {
+    await emitClaude(call, callIndex);
+  }
 }
 
 process.exit(call.exitCode ?? 0);
@@ -100,6 +108,10 @@ async function emitClaude(call, index) {
     });
   }
 
+  if (call.skipCompletion) {
+    return;
+  }
+
   await sleep(call.chunkDelayMs || 0);
   println({
     type: "result",
@@ -127,6 +139,10 @@ async function emitCodex(call, index) {
     });
   }
 
+  if (call.skipCompletion) {
+    return;
+  }
+
   await sleep(call.chunkDelayMs || 0);
   println({
     type: "item.completed",
@@ -147,6 +163,53 @@ async function emitCodex(call, index) {
   });
 }
 
+async function emitGemini(call, index) {
+  println({
+    type: "init",
+    session_id: call.sessionId || `mock-gemini-${index}`,
+    model: "gemini-3-flash-preview",
+  });
+  println({
+    type: "message",
+    role: "user",
+    content: call.promptEcho || "prompt",
+  });
+
+  if (call.toolActivity) {
+    await sleep(call.chunkDelayMs || 0);
+    println({
+      type: "tool_use",
+      tool_name: call.toolActivity,
+      tool_id: "tool_0",
+      parameters: call.toolParameters || {},
+    });
+  }
+
+  for (const chunk of getChunks(call.text || "")) {
+    await sleep(call.chunkDelayMs || 0);
+    println({
+      type: "message",
+      role: "assistant",
+      content: chunk,
+      delta: true,
+    });
+  }
+
+  if (call.skipCompletion) {
+    return;
+  }
+
+  await sleep(call.chunkDelayMs || 0);
+  println({
+    type: "result",
+    status: "success",
+    stats: {
+      input_tokens: 1,
+      output_tokens: 1,
+    },
+  });
+}
+
 function getChunks(text) {
   if (!text) return [];
   if (Array.isArray(text)) return text;
@@ -157,6 +220,16 @@ function getText(text) {
   if (!text) return "";
   if (Array.isArray(text)) return text.join("");
   return text;
+}
+
+function shouldSkipTurnOutput(call) {
+  if (!call || !call.exitCode || call.exitCode === 0) return false;
+  const hasText = Array.isArray(call.text) ? call.text.length > 0 : Boolean(call.text);
+  return !hasText
+    && !call.resultText
+    && !call.sessionId
+    && !call.toolActivity
+    && !call.thinking;
 }
 
 function parseClaudeArgs(args) {
@@ -225,6 +298,15 @@ function parseCodexArgs(args) {
   return {
     resumeId: null,
     prompt: positional.at(-1) || "",
+  };
+}
+
+function parseGeminiArgs(args) {
+  const promptIndex = args.indexOf("-p");
+  const resumeIndex = args.indexOf("--resume");
+  return {
+    prompt: promptIndex === -1 ? "" : args[promptIndex + 1] || "",
+    resumeId: resumeIndex === -1 ? null : args[resumeIndex + 1] || null,
   };
 }
 

@@ -113,6 +113,19 @@ describe("WorktreeManager", () => {
       const list = await mgr.list();
       expect(list).toEqual([]);
     });
+
+    it("fills unknown branch names when porcelain output omits a branch line", async () => {
+      mockExecSync.mockReturnValue(
+        "worktree /tmp/myproject-detached\nHEAD abcdef123\n\n",
+      );
+      const list = await mgr.list();
+      expect(list).toEqual([
+        expect.objectContaining({
+          name: "myproject-detached",
+          branch: "unknown",
+        }),
+      ]);
+    });
   });
 
   describe("remove", () => {
@@ -136,6 +149,21 @@ describe("WorktreeManager", () => {
       await mgr.remove("myproject-feature-x");
       expect(mockExecSync).toHaveBeenCalledWith(
         expect.stringContaining("myproject-feature-x"),
+        expect.anything(),
+      );
+    });
+
+    it("swallows branch deletion failures after removing the worktree", async () => {
+      mockExecSync
+        .mockReturnValueOnce("")
+        .mockImplementationOnce(() => {
+          throw new Error("branch still merged elsewhere");
+        });
+
+      await expect(mgr.remove("feature-x")).resolves.toBeUndefined();
+      expect(mockExecSync).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining("git branch -d"),
         expect.anything(),
       );
     });
@@ -181,11 +209,54 @@ describe("WorktreeManager", () => {
       );
     });
 
+    it("detects yarn from yarn.lock", async () => {
+      vi.mocked(existsSync).mockImplementation((p: any) => {
+        const path = String(p);
+        if (path.endsWith("yarn.lock")) return true;
+        if (path.endsWith("package.json")) return true;
+        return false;
+      });
+      await mgr.installDeps("/tmp/wt");
+      expect(mockExecSync).toHaveBeenCalledWith(
+        "yarn install",
+        expect.anything(),
+      );
+    });
+
+    it("ignores install failures because dependencies may already exist", async () => {
+      vi.mocked(existsSync).mockImplementation((p: any) => {
+        return String(p).endsWith("package.json");
+      });
+      mockExecSync.mockImplementationOnce(() => {
+        throw new Error("install failed");
+      });
+      await expect(mgr.installDeps("/tmp/wt")).resolves.toBeUndefined();
+    });
+
     it("skips install when no package.json", async () => {
       vi.mocked(existsSync).mockReturnValue(false);
       mockExecSync.mockClear();
       await mgr.installDeps("/tmp/wt");
       expect(mockExecSync).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("copyConfigFiles", () => {
+    it("copies nested files from the custom copy list and ignores malformed copy lists", async () => {
+      vi.mocked(existsSync).mockImplementation((p: any) => {
+        const path = String(p);
+        if (path.includes(".roscoe/copy-files.json")) return true;
+        if (path.endsWith("copy-me/config.json")) return true;
+        if (path.endsWith(".env.local")) return true;
+        return false;
+      });
+      vi.mocked(readFileSync).mockReturnValueOnce(JSON.stringify(["copy-me/config.json"]));
+
+      const copied = await mgr.copyConfigFiles("/tmp/wt");
+      expect(copied).toEqual(expect.arrayContaining(["copy-me/config.json", ".env.local"]));
+
+      vi.mocked(readFileSync).mockReturnValueOnce("{not-json");
+      await expect(mgr.copyConfigFiles("/tmp/wt")).resolves.toEqual([".env.local"]);
     });
   });
 });

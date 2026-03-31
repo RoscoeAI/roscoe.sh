@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "events";
+import { writeFileSync } from "fs";
 
 // Create a class that properly extends EventEmitter for the mock
 class MockSessionMonitor extends EventEmitter {
   startTurn = vi.fn();
   sendFollowUp = vi.fn();
+  setProfile = vi.fn();
   getSessionId = vi.fn(() => "sess-1");
   kill = vi.fn();
   id: string;
@@ -29,6 +31,8 @@ vi.mock("./config.js", () => ({
   registerProject: vi.fn(),
   saveProjectHistory: vi.fn(),
   saveProjectContext: vi.fn(),
+  getProjectMemoryDir: vi.fn((directory: string) => `${directory}/.roscoe`),
+  resolveProjectRoot: vi.fn((directory: string) => directory),
   normalizeProjectContext: vi.fn((value: any) => ({
     name: value.name ?? "project",
     directory: value.directory ?? "/tmp",
@@ -36,7 +40,7 @@ vi.mock("./config.js", () => ({
     milestones: value.milestones ?? [],
     techStack: value.techStack ?? [],
     notes: value.notes ?? "",
-    intentBrief: value.intentBrief ?? {
+    intentBrief: {
       projectStory: value.notes || "Deliver the project goals without drifting scope.",
       primaryUsers: [],
       definitionOfDone: value.goals ?? [],
@@ -49,12 +53,32 @@ vi.mock("./config.js", () => ({
         e2eTests: [],
       },
       coverageMechanism: [],
+      deploymentContract: {
+        mode: "defer",
+        summary: "Deployment is not locked yet. Roscoe should define or infer the deploy path later before mutating environments.",
+        artifactType: "",
+        platforms: [],
+        environments: [],
+        buildSteps: [],
+        deploySteps: [],
+        previewStrategy: [],
+        presenceStrategy: [],
+        proofTargets: [],
+        healthChecks: [],
+        rollback: [],
+        requiredSecrets: [],
+      },
       nonGoals: [],
       constraints: [],
+      architecturePrinciples: [
+        "Favor shared components and shared domain modules over duplicated feature-specific implementations.",
+        "Keep material writes, external integrations, and background or queued work behind explicit service seams with consistent audit logging.",
+      ],
       autonomyRules: [],
       qualityBar: [],
       riskBoundaries: [],
       uiDirection: "",
+      ...(value.intentBrief ?? {}),
     },
     interviewAnswers: value.interviewAnswers ?? [],
     ...(value.runtimeDefaults ? { runtimeDefaults: value.runtimeDefaults } : {}),
@@ -70,6 +94,8 @@ vi.mock("fs", () => ({
   mkdirSync: vi.fn(),
   writeFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
+  readdirSync: vi.fn(() => []),
+  statSync: vi.fn(() => ({ isDirectory: () => true })),
 }));
 
 import { Onboarder } from "./onboarder.js";
@@ -108,14 +134,87 @@ function seedInterviewCoverage(onboarder: Onboarder) {
     question: "What quality bar should Roscoe enforce before Guild work is considered done?",
     theme: "quality-bar",
   });
-  onboarder.sendInput("Use Vitest and Playwright coverage reports so Roscoe always has a measurable percent gate", {
-    question: "How will Roscoe measure coverage percent in this repo?",
+  onboarder.sendInput("Use Vitest and Playwright runs as the canonical validation path, with previews or demos when that answers the next decision faster", {
+    question: "How should Roscoe validate progress in this repo?",
     theme: "coverage-mechanism",
   });
   onboarder.sendInput("Avoid regressions", {
     question: "What risks Roscoe should avoid without explicit approval?",
     theme: "risk-boundaries",
   });
+}
+
+function buildReadyBrief(overrides: Record<string, any> = {}) {
+  const overrideIntent = overrides.intentBrief ?? {};
+  return {
+    name: "TestProject",
+    directory: "/tmp",
+    goals: ["goal1"],
+    milestones: ["m1"],
+    techStack: ["TypeScript"],
+    notes: "",
+    ...overrides,
+    intentBrief: {
+      projectStory: "Ship safely",
+      primaryUsers: ["operators"],
+      definitionOfDone: ["The frontend and backend operator workflow behave correctly"],
+      acceptanceChecks: ["Vitest unit/component and Playwright e2e runs prove the full workflow end to end"],
+      successSignals: ["operators can finish the task"],
+      entrySurfaceContract: {
+        summary: "The root route should show the real operator entry point.",
+        defaultRoute: "/",
+        expectedExperience: "Operators land on a truthful entry surface instead of a scaffold placeholder.",
+        allowedShellStates: ["Auth gate is acceptable only if it clearly explains the prerequisite."],
+      },
+      localRunContract: {
+        summary: "Local dev boot should explain prerequisites and let operators reach the intended entry path.",
+        startCommand: "pnpm dev",
+        firstRoute: "http://localhost:3000",
+        prerequisites: ["database running"],
+        seedRequirements: ["seed demo tenant"],
+        expectedBlockedStates: ["sign in required"],
+        operatorSteps: ["Run pnpm dev", "Open the root route and confirm the truthful entry surface"],
+      },
+      acceptanceLedger: [
+        {
+          label: "Local operator happy path works",
+          status: "open",
+          evidence: ["Vitest and Playwright prove the main flow", "Preview or demo confirms the entry path"],
+          notes: "Still needs proof.",
+        },
+      ],
+      deliveryPillars: {
+        frontend: ["Frontend operator flow is complete and stable"],
+        backend: ["Backend workflow API is correct and stable"],
+        unitComponentTests: ["Vitest unit/component tests cover changed frontend/backend logic, regressions, and edge cases at a reasonable level for the current slice"],
+        e2eTests: ["Playwright e2e tests cover workflow success and failure modes at the right stage of hardening"],
+      },
+      coverageMechanism: ["Vitest plus Playwright runs provide the canonical validation path for this repo"],
+      deploymentContract: {
+        mode: "defer",
+        summary: "Deployment is intentionally deferred until the local path is proven.",
+        artifactType: "web app",
+        platforms: [],
+        environments: [],
+        buildSteps: ["pnpm build"],
+        deploySteps: [],
+        previewStrategy: ["Use local preview until deployment is explicitly chosen."],
+        presenceStrategy: ["Defer hosted proof until the operator explicitly chooses the first non-local environment."],
+        proofTargets: ["The first preview or staging URL will be chosen later in conversation."],
+        healthChecks: ["Local happy path works"],
+        rollback: ["No deploy target chosen yet."],
+        requiredSecrets: [],
+      },
+      nonGoals: ["avoid scope creep"],
+      constraints: ["maintain compatibility"],
+      architecturePrinciples: ["Preserve shared workflow modules and keep audit logging consistent across material writes"],
+      autonomyRules: ["ask before changing scope"],
+      qualityBar: ["Do not call done until Vitest and Playwright provide reasonable, risk-based proof on the frontend and backend outcomes"],
+      riskBoundaries: ["avoid regressions"],
+      uiDirection: "",
+      ...overrideIntent,
+    },
+  };
 }
 
 describe("Onboarder", () => {
@@ -134,6 +233,16 @@ describe("Onboarder", () => {
     it("creates a SessionMonitor and starts a turn", () => {
       onboarder.start();
       expect(mockMonitorInstance.startTurn).toHaveBeenCalledWith(expect.stringContaining("Roscoe's onboarding strategist"));
+      expect(mockMonitorInstance.startTurn).toHaveBeenCalledWith(expect.stringContaining("architecture principles"));
+      expect(mockMonitorInstance.startTurn).toHaveBeenCalledWith(expect.stringContaining("Deployment is a first-class project contract"));
+      expect(mockMonitorInstance.startTurn).toHaveBeenCalledWith(expect.stringContaining("hosted proof surface"));
+    });
+
+    it("treats an empty workspace as a greenfield vision-first intake", () => {
+      onboarder.start();
+      expect(mockMonitorInstance.startTurn).toHaveBeenCalledWith(
+        expect.stringContaining("vision-first build from an empty or scaffold-only workspace"),
+      );
     });
 
     it("returns the session via getSession", () => {
@@ -199,6 +308,28 @@ describe("Onboarder", () => {
         expect.stringContaining("Option A"),
       );
     });
+
+    it("stores provided secrets without echoing raw values back into the transcript prompt", () => {
+      onboarder.start();
+      onboarder.sendSecretInput({
+        key: "CF_API_TOKEN",
+        label: "Cloudflare token",
+        purpose: "Needed for previews",
+        instructions: ["Open dashboard"],
+        links: [{ label: "Docs", url: "https://example.com" }],
+        required: true,
+        targetFile: ".env.local",
+      }, "provided", "super-secret-value");
+
+      expect(mockMonitorInstance.setProfile).toHaveBeenCalled();
+      expect(mockMonitorInstance.sendFollowUp).toHaveBeenCalledWith(
+        expect.stringContaining("The user securely provided CF_API_TOKEN."),
+      );
+      expect(mockMonitorInstance.sendFollowUp).not.toHaveBeenCalledWith(
+        expect.stringContaining("super-secret-value"),
+      );
+      expect(vi.mocked(writeFileSync)).toHaveBeenCalled();
+    });
   });
 
   describe("checkForProjectBrief", () => {
@@ -211,36 +342,52 @@ describe("Onboarder", () => {
           expect(brief.intentBrief).toBeTruthy();
           resolve();
         });
-        const briefJson = JSON.stringify({
-          name: "TestProject",
-          directory: "/tmp",
-          goals: ["goal1"],
-          milestones: ["m1"],
-          techStack: ["TypeScript"],
-          notes: "",
-          intentBrief: {
-            projectStory: "Ship safely",
-            primaryUsers: ["operators"],
-            definitionOfDone: ["The frontend and backend operator workflow behave correctly"],
-            acceptanceChecks: ["Vitest unit/component and Playwright e2e runs prove the full workflow end to end"],
-            successSignals: ["operators can finish the task"],
-            deliveryPillars: {
-              frontend: ["Frontend operator flow is complete and stable"],
-              backend: ["Backend workflow API is correct and stable"],
-              unitComponentTests: ["Vitest unit/component coverage reaches 100% on frontend/backend logic and edge cases"],
-              e2eTests: ["Playwright e2e coverage reaches 100% on workflow success and failure modes"],
-            },
-            coverageMechanism: ["Vitest plus Playwright coverage reports provide a measurable percent gate"],
-            nonGoals: ["avoid scope creep"],
-            constraints: ["maintain compatibility"],
-            autonomyRules: ["ask before changing scope"],
-            qualityBar: ["Do not call done until Vitest and Playwright show 100% coverage with edge cases proving the frontend and backend outcomes"],
-            riskBoundaries: ["avoid regressions"],
-            uiDirection: "",
-          },
-        });
+        const briefJson = JSON.stringify(buildReadyBrief());
         mockMonitorInstance.emit("text", `Analysis complete.\n---BRIEF---\n${briefJson}\n---END_BRIEF---`);
         mockMonitorInstance.emit("turn-complete");
+      });
+    });
+
+    it("keeps interviewing for a greenfield UI brief that never defines the local first-run path", () => {
+      onboarder.start();
+      seedInterviewCoverage(onboarder);
+
+      const briefJson = JSON.stringify(buildReadyBrief({
+        techStack: ["React", "TypeScript"],
+        notes: "Greenfield web app.",
+        intentBrief: {
+          uiDirection: "Clean web app",
+          localRunContract: {
+            summary: "",
+            startCommand: "",
+            firstRoute: "",
+            prerequisites: [],
+            seedRequirements: [],
+            expectedBlockedStates: [],
+            operatorSteps: [],
+          },
+        },
+      }));
+
+      mockMonitorInstance.emit("text", `Analysis complete.\n---BRIEF---\n${briefJson}\n---END_BRIEF---`);
+      mockMonitorInstance.emit("turn-complete");
+
+      expect(mockMonitorInstance.sendFollowUp).toHaveBeenLastCalledWith(
+        expect.stringContaining("local first-run contract and prerequisite handling for the greenfield UI"),
+      );
+    });
+
+    it("persists the brief on clean exit even if turn-complete never arrived", () => {
+      return new Promise<void>((resolve) => {
+        onboarder.start();
+        seedInterviewCoverage(onboarder);
+        onboarder.on("onboarding-complete", (brief: any) => {
+          expect(brief.name).toBe("TestProject");
+          resolve();
+        });
+        const briefJson = JSON.stringify(buildReadyBrief());
+        mockMonitorInstance.emit("text", `Analysis complete.\n---BRIEF---\n${briefJson}\n---END_BRIEF---`);
+        mockMonitorInstance.emit("exit", 0);
       });
     });
 
@@ -270,34 +417,7 @@ describe("Onboarder", () => {
           });
           resolve();
         });
-        const briefJson = JSON.stringify({
-          name: "TestProject",
-          directory: "/tmp",
-          goals: ["goal1"],
-          milestones: ["m1"],
-          techStack: ["TypeScript"],
-          notes: "",
-          intentBrief: {
-            projectStory: "Ship safely",
-            primaryUsers: ["operators"],
-            definitionOfDone: ["The frontend and backend operator workflow behave correctly"],
-            acceptanceChecks: ["Vitest unit/component and Playwright e2e runs prove the full workflow end to end"],
-            successSignals: ["operators can finish the task"],
-            deliveryPillars: {
-              frontend: ["Frontend operator flow is complete and stable"],
-              backend: ["Backend workflow API is correct and stable"],
-              unitComponentTests: ["Vitest unit/component coverage reaches 100% on frontend/backend logic and edge cases"],
-              e2eTests: ["Playwright e2e coverage reaches 100% on workflow success and failure modes"],
-            },
-            coverageMechanism: ["Vitest plus Playwright coverage reports provide a measurable percent gate"],
-            nonGoals: ["avoid scope creep"],
-            constraints: ["maintain compatibility"],
-            autonomyRules: ["ask before changing scope"],
-            qualityBar: ["Do not call done until Vitest and Playwright show 100% coverage with edge cases proving the frontend and backend outcomes"],
-            riskBoundaries: ["avoid regressions"],
-            uiDirection: "",
-          },
-        });
+        const briefJson = JSON.stringify(buildReadyBrief());
         mockMonitorInstance.emit("text", `Analysis complete.\n---BRIEF---\n${briefJson}\n---END_BRIEF---`);
         mockMonitorInstance.emit("turn-complete");
       });
@@ -316,34 +436,7 @@ describe("Onboarder", () => {
           });
           resolve();
         });
-        const briefJson = JSON.stringify({
-          name: "TestProject",
-          directory: "/tmp",
-          goals: ["goal1"],
-          milestones: ["m1"],
-          techStack: ["TypeScript"],
-          notes: "",
-          intentBrief: {
-            projectStory: "Ship safely",
-            primaryUsers: ["operators"],
-            definitionOfDone: ["The frontend and backend operator workflow behave correctly"],
-            acceptanceChecks: ["Vitest unit/component and Playwright e2e runs prove the full workflow end to end"],
-            successSignals: ["operators can finish the task"],
-            deliveryPillars: {
-              frontend: ["Frontend operator flow is complete and stable"],
-              backend: ["Backend workflow API is correct and stable"],
-              unitComponentTests: ["Vitest unit/component coverage reaches 100% on frontend/backend logic and edge cases"],
-              e2eTests: ["Playwright e2e coverage reaches 100% on workflow success and failure modes"],
-            },
-            coverageMechanism: ["Vitest plus Playwright coverage reports provide a measurable percent gate"],
-            nonGoals: ["avoid scope creep"],
-            constraints: ["maintain compatibility"],
-            autonomyRules: ["ask before changing scope"],
-            qualityBar: ["Do not call done until Vitest and Playwright show 100% coverage with edge cases proving the frontend and backend outcomes"],
-            riskBoundaries: ["avoid regressions"],
-            uiDirection: "",
-          },
-        });
+        const briefJson = JSON.stringify(buildReadyBrief());
         mockMonitorInstance.emit("text", `Analysis complete.\n---BRIEF---\n${briefJson}\n---END_BRIEF---`);
         mockMonitorInstance.emit("turn-complete");
       });

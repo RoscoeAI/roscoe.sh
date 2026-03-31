@@ -12,8 +12,8 @@ import {
 } from "./config.js";
 import { WorktreeManager } from "./worktree-manager.js";
 import App from "./app.js";
-import "dotenv/config";
-import { RuntimeControlSettings } from "./llm-runtime.js";
+import { detectProtocol, LLMProtocol, RuntimeControlSettings } from "./llm-runtime.js";
+import { hydrateProcessEnv } from "./project-secrets.js";
 
 function expandTilde(p: string): string {
   if (p === "~") return homedir();
@@ -23,13 +23,15 @@ function expandTilde(p: string): string {
 
 const program = new Command();
 
+hydrateProcessEnv(process.cwd());
+
 function cleanRuntimeSettings(settings: RuntimeControlSettings): RuntimeControlSettings | undefined {
   const entries = Object.entries(settings).filter(([, value]) => value !== undefined && value !== false && value !== "");
   if (entries.length === 0) return undefined;
   return Object.fromEntries(entries) as RuntimeControlSettings;
 }
 
-function buildProviderRuntimeOverrides(options: Record<string, unknown>): Partial<Record<"claude" | "codex", RuntimeControlSettings>> {
+function buildProviderRuntimeOverrides(options: Record<string, unknown>): Partial<Record<LLMProtocol, RuntimeControlSettings>> {
   const hasClaudeOverride =
     typeof options.claudeModel === "string" ||
     typeof options.claudeEffort === "string" ||
@@ -43,7 +45,7 @@ function buildProviderRuntimeOverrides(options: Record<string, unknown>): Partia
     typeof options.codexApproval === "string" ||
     options.codexDangerous === true;
 
-  const overrides: Partial<Record<"claude" | "codex", RuntimeControlSettings>> = {};
+  const overrides: Partial<Record<LLMProtocol, RuntimeControlSettings>> = {};
 
   if (hasClaudeOverride) {
     const claude = cleanRuntimeSettings({
@@ -62,10 +64,8 @@ function buildProviderRuntimeOverrides(options: Record<string, unknown>): Partia
       reasoningEffort: options.codexEffort as string | undefined,
       sandboxMode: options.codexSandbox as string | undefined,
       approvalPolicy: options.codexApproval as string | undefined,
+      bypassApprovalsAndSandbox: options.codexDangerous === true,
       executionMode: options.codexDangerous === true ? "accelerated" : undefined,
-      ...(options.codexDangerous === true
-        ? { sandboxMode: "danger-full-access", approvalPolicy: "never" }
-        : {}),
     });
     if (codex) overrides.codex = codex;
   }
@@ -108,7 +108,7 @@ program
   .option("--codex-effort <level>", "Codex reasoning effort override")
   .option("--codex-sandbox <mode>", "Codex sandbox mode override")
   .option("--codex-approval <policy>", "Codex approval policy override")
-  .option("--codex-dangerous", "Run Codex workers with -s danger-full-access -a never")
+  .option("--codex-dangerous", "Run Codex workers with --dangerously-bypass-approvals-and-sandbox")
   .action((specs: string[], options: Record<string, unknown>) => {
     render(
       React.createElement(App, {
@@ -125,7 +125,7 @@ program
 program
   .command("onboard")
   .description(
-    "Onboard a project — analyze codebase, interview developer, generate system docs",
+    "Onboard a project — analyze an existing repo or define a new project vision, then save the operating contract",
   )
   .argument("<dir>", "Path to the project directory")
   .option("--profile <name>", "Initial onboarding profile to use")
@@ -137,7 +137,7 @@ program
   .option("--codex-effort <level>", "Default Codex onboarding reasoning effort")
   .option("--codex-sandbox <mode>", "Default Codex onboarding sandbox mode")
   .option("--codex-approval <policy>", "Default Codex onboarding approval policy")
-  .option("--codex-dangerous", "Run Codex onboarding with danger-full-access and never approval")
+  .option("--codex-dangerous", "Run Codex onboarding with --dangerously-bypass-approvals-and-sandbox")
   .action((dir: string, options: Record<string, unknown>) => {
     const debug = program.opts().debug === true;
     const overrides = buildProviderRuntimeOverrides(options);
@@ -153,7 +153,9 @@ program
         : inferredProvider === "claude"
           ? "claude-code"
           : undefined;
-    const provider = profileName?.includes("codex") ? "codex" : profileName ? "claude" : inferredProvider;
+    const provider = profileName
+      ? detectProtocol({ name: profileName, command: profileName })
+      : inferredProvider;
     render(
       React.createElement(App, {
         initialScreen: "onboarding",

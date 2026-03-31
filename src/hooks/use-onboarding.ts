@@ -8,7 +8,8 @@ import {
   loadProjectContext,
   listProjectHistory,
 } from "../config.js";
-import { detectProtocol, HeadlessProfile } from "../llm-runtime.js";
+import { detectProtocol, getProviderAdapter, HeadlessProfile } from "../llm-runtime.js";
+import { cleanSecretBlocks, parseSecretRequestBlock, ProjectSecretRequest } from "../project-secrets.js";
 
 export type OnboardingStatus = "idle" | "initializing" | "running" | "interviewing" | "complete" | "error";
 
@@ -41,9 +42,14 @@ export interface OnboardingState {
   thinkingText: string;
   qaHistory: QAPair[];
   question: InterviewQuestion | null;
+  secretRequest: ProjectSecretRequest | null;
   error: string | null;
   projectContext: ProjectContext | null;
   toolActivity: string | null;
+}
+
+export function parseSecretRequest(text: string): ProjectSecretRequest | null {
+  return parseSecretRequestBlock(text);
 }
 
 /** Parse structured question block from Claude's response */
@@ -69,10 +75,11 @@ export function parseQuestion(text: string): InterviewQuestion | null {
 
 /** Remove structured blocks from display text */
 export function cleanStreamingText(text: string): string {
-  return text
-    .replace(/---QUESTION---[\s\S]*?---END_QUESTION---/g, "")
-    .replace(/---BRIEF---[\s\S]*?---END_BRIEF---/g, "")
-    .trim();
+  return cleanSecretBlocks(
+    text
+      .replace(/---QUESTION---[\s\S]*?---END_QUESTION---/g, "")
+      .replace(/---BRIEF---[\s\S]*?---END_BRIEF---/g, ""),
+  ).trim();
 }
 
 export function appendStreamingChunk(previous: string, chunk: string): string {
@@ -87,7 +94,7 @@ export function appendStreamingChunk(previous: string, chunk: string): string {
 
 export function formatOnboardingExitError(profile: HeadlessProfile | undefined, code: number): string {
   const provider = profile ? detectProtocol(profile) : "claude";
-  return `${provider === "codex" ? "Codex" : "Claude"} exited with code ${code}`;
+  return `${getProviderAdapter(provider).label} exited with code ${code}`;
 }
 
 export function useOnboarding() {
@@ -97,6 +104,7 @@ export function useOnboarding() {
     thinkingText: "",
     qaHistory: [],
     question: null,
+    secretRequest: null,
     error: null,
     projectContext: null,
     toolActivity: null,
@@ -134,6 +142,7 @@ export function useOnboarding() {
       thinkingText: "",
       qaHistory: [],
       question: null,
+      secretRequest: null,
       error: null,
     }));
 
@@ -178,6 +187,7 @@ export function useOnboarding() {
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
 
       const question = parseQuestion(fullText);
+      const secretRequest = parseSecretRequest(fullText);
       const cleaned = cleanStreamingText(fullText);
 
       setState((prev) => ({
@@ -185,7 +195,8 @@ export function useOnboarding() {
         status: "interviewing",
         streamingText: cleaned,
         thinkingText: "",
-        question,
+        question: secretRequest ? null : question,
+        secretRequest,
         toolActivity: null,
       }));
 
@@ -197,6 +208,7 @@ export function useOnboarding() {
       setState((prev) => ({
         ...prev,
         status: "complete",
+        secretRequest: null,
         projectContext: context,
       }));
     });
@@ -211,6 +223,7 @@ export function useOnboarding() {
         ...prev,
         status: "running",
         question: null,
+        secretRequest: null,
         toolActivity: null,
         streamingText: details
           ? `Roscoe is tightening the intent brief before finishing. ${details}`
@@ -273,6 +286,55 @@ export function useOnboarding() {
     });
   }, []);
 
+  const sendSecretInput = useCallback((request: ProjectSecretRequest, secretValue: string) => {
+    const trimmed = secretValue.trim();
+    if (!trimmed) return;
+
+    setState((prev) => {
+      onboarderRef.current?.sendSecretInput(request, "provided", trimmed);
+      return {
+        ...prev,
+        status: "running",
+        question: null,
+        secretRequest: null,
+        toolActivity: null,
+        streamingText: "",
+        thinkingText: "",
+        qaHistory: [
+          ...prev.qaHistory,
+          {
+            question: `Secure secret: ${request.label}`,
+            answer: `[provided securely in ${request.targetFile}]`,
+            theme: `secret:${request.key}`,
+          },
+        ],
+      };
+    });
+  }, []);
+
+  const skipSecretInput = useCallback((request: ProjectSecretRequest) => {
+    setState((prev) => {
+      onboarderRef.current?.sendSecretInput(request, "skipped");
+      return {
+        ...prev,
+        status: "running",
+        question: null,
+        secretRequest: null,
+        toolActivity: null,
+        streamingText: "",
+        thinkingText: "",
+        qaHistory: [
+          ...prev.qaHistory,
+          {
+            question: `Secure secret: ${request.label}`,
+            answer: "[skipped for now]",
+            theme: `secret:${request.key}`,
+          },
+        ],
+      };
+    });
+  }, []);
+
   const updateRuntime = useCallback((
     profile: HeadlessProfile,
     runtimeDefaults?: ProjectRuntimeDefaults,
@@ -280,5 +342,5 @@ export function useOnboarding() {
     onboarderRef.current?.updateRuntime(profile, runtimeDefaults);
   }, []);
 
-  return { state, start, sendInput, updateRuntime };
+  return { state, start, sendInput, sendSecretInput, skipSecretInput, updateRuntime };
 }

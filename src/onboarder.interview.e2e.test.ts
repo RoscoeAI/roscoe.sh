@@ -14,7 +14,7 @@ import { fileURLToPath } from "url";
 import { afterEach, describe, expect, it } from "vitest";
 import { Onboarder } from "./onboarder.js";
 import { HeadlessProfile } from "./llm-runtime.js";
-import { parseQuestion } from "./hooks/use-onboarding.js";
+import { parseQuestion, parseSecretRequest } from "./hooks/use-onboarding.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -196,6 +196,9 @@ describe.sequential("onboarder interview e2e", () => {
               e2eTests: string[];
             };
             coverageMechanism: string[];
+            deploymentContract?: {
+              summary: string;
+            };
             nonGoals: string[];
             autonomyRules: string[];
             qualityBar: string[];
@@ -212,6 +215,7 @@ describe.sequential("onboarder interview e2e", () => {
         expect(context.intentBrief.deliveryPillars.unitComponentTests).toHaveLength(1);
         expect(context.intentBrief.deliveryPillars.e2eTests).toHaveLength(1);
         expect(context.intentBrief.coverageMechanism).toHaveLength(1);
+        expect(context.intentBrief.deploymentContract?.summary).toBeTruthy();
         expect(context.intentBrief.nonGoals).toHaveLength(1);
         expect(context.intentBrief.autonomyRules).toHaveLength(1);
         expect(context.intentBrief.qualityBar).toHaveLength(1);
@@ -223,6 +227,7 @@ describe.sequential("onboarder interview e2e", () => {
         const saved = JSON.parse(readFileSync(briefPath, "utf-8"));
         expect(saved.intentBrief.acceptanceChecks[0]).toContain("Vitest");
         expect(saved.intentBrief.coverageMechanism[0]).toContain("measurable percent");
+        expect(saved.intentBrief.deploymentContract.summary).toBeTruthy();
         expect(saved.interviewAnswers).toHaveLength(10);
 
         const invocations = readInvocationLog(env.logPath);
@@ -378,6 +383,85 @@ describe.sequential("onboarder interview e2e", () => {
 
         const historyDirEntries = readdirSync(join(projectDir, ".roscoe", "history"));
         expect(historyDirEntries.length).toBeGreaterThan(1);
+      } finally {
+        env.restore();
+        process.env.HOME = previousHome;
+      }
+    },
+    30000,
+  );
+
+  it.each(["claude", "codex"] as const)(
+    "collects a secret securely during refinement with %s",
+    async (provider) => {
+      const env = createMockEnv(buildSecretRefineScenario(provider));
+      const previousHome = process.env.HOME;
+      process.env.HOME = env.projectDir;
+
+      try {
+        const profile = makeProfile(
+          provider,
+          provider === "claude" ? env.claudeCommand : env.codexCommand,
+        );
+        const onboarder = new Onboarder(env.projectDir, false, profile, undefined, {
+          mode: "refine",
+          refineThemes: ["delivery-pillars"],
+          seedContext: {
+            name: "Secret Project",
+            directory: env.projectDir,
+            goals: ["Ship previews safely"],
+            milestones: ["v1"],
+            techStack: ["TypeScript"],
+            notes: "Need a deployment token for preview infrastructure.",
+            intentBrief: {
+              projectStory: "Ship previews safely",
+              primaryUsers: ["operators"],
+              definitionOfDone: ["Previews can be created and validated."],
+              acceptanceChecks: ["The preview flow can be executed safely."],
+              successSignals: ["Operators can verify builds."],
+              deliveryPillars: {
+                frontend: ["Preview UI is understandable."],
+                backend: ["Preview API calls work safely."],
+                unitComponentTests: ["Vitest covers the changed preview logic, regressions, and important failure modes at a reasonable level."],
+                e2eTests: ["Playwright covers the preview workflow and critical failure modes at the right stage."],
+              },
+              coverageMechanism: ["Vitest and Playwright"],
+              nonGoals: ["No production rollout work."],
+              constraints: ["Keep secrets local."],
+              architecturePrinciples: ["Keep deployment credentials behind explicit env seams."],
+              autonomyRules: ["Ask before broadening scope."],
+              qualityBar: ["Use reasonable, risk-based proof of changed preview behavior, regressions, and failure modes before calling the slice done."],
+              riskBoundaries: ["Do not leak secrets into logs or committed files."],
+              uiDirection: "",
+            },
+            interviewAnswers: [],
+          },
+          seedHistory: [],
+        });
+
+        let currentOutput = "";
+        onboarder.on("output", (chunk: string) => {
+          currentOutput += chunk;
+        });
+
+        let turnDone = once(onboarder, "turn-complete");
+        onboarder.start();
+        await turnDone;
+
+        const request = parseSecretRequest(currentOutput);
+        expect(request?.key).toBe("CF_API_TOKEN");
+
+        const completed = once(onboarder, "onboarding-complete");
+        onboarder.sendSecretInput(request!, "provided", "top-secret-token");
+        await completed;
+
+        const envFile = join(env.projectDir, ".env.local");
+        expect(existsSync(envFile)).toBe(true);
+        expect(readFileSync(envFile, "utf-8")).toContain('CF_API_TOKEN="top-secret-token"');
+
+        const invocations = readInvocationLog(env.logPath);
+        expect(invocations.some((entry) => entry.prompt.includes("The user securely provided CF_API_TOKEN."))).toBe(true);
+        expect(invocations.some((entry) => entry.prompt.includes("top-secret-token"))).toBe(false);
       } finally {
         env.restore();
         process.env.HOME = previousHome;
@@ -592,6 +676,38 @@ function buildRefineScenario(provider: MockProvider): MockCall[] {
         "Roscoe has enough to update the saved brief.\n\n",
         "---BRIEF---\n",
         '{"name":"Refine Project","directory":"/ignored","goals":["Ship the operator workflow"],"milestones":["v1"],"techStack":["TypeScript"],"notes":"Existing brief","intentBrief":{"projectStory":"Ship a clean operator workflow","primaryUsers":["Operations teams"],"definitionOfDone":["Operators can complete the incident workflow, including screenshot/video evidence capture when required"],"acceptanceChecks":["The full operator path works and proves the frontend and backend outcomes"],"successSignals":["Operators stay in the product"],"deliveryPillars":{"frontend":["Operator UI completes the workflow"],"backend":["Workflow API persists state correctly"],"unitComponentTests":["Vitest reaches 100% coverage and proves the frontend and backend outcomes across unit and component edge cases"],"e2eTests":["Playwright reaches 100% coverage, proves the full end-to-end frontend/backend workflow, and verifies screenshot/video evidence capture when required"]},"coverageMechanism":["Vitest and Playwright coverage reports with measurable percent gates"],"nonGoals":["No adjacent reporting work"],"constraints":["Keep the locked provider"],"autonomyRules":["Ask before changing scope"],"qualityBar":["100% coverage with edge cases proving the frontend and backend outcomes"],"riskBoundaries":["Avoid hidden regressions"],"uiDirection":"Operator control room"}}',
+        "\n---END_BRIEF---",
+      ],
+    },
+  ];
+}
+
+function buildSecretRefineScenario(provider: MockProvider): MockCall[] {
+  const sessionId = `${provider}-secret-refine-1`;
+  return [
+    {
+      provider,
+      promptIncludes: "You are Roscoe's refinement strategist",
+      sessionId,
+      text: [
+        "Roscoe found one immediate delivery blocker.\n\n",
+        "---SECRET---\n",
+        '{"key":"CF_API_TOKEN","label":"Cloudflare API token","purpose":"Needed to create preview infrastructure for this project.","instructions":["Open Cloudflare and go to API Tokens.","Create a token with the minimum preview permissions.","Copy the token and paste it here securely."],"links":[{"label":"Cloudflare API tokens","url":"https://dash.cloudflare.com/profile/api-tokens"}],"required":true,"targetFile":".env.local"}',
+        "\n---END_SECRET---",
+      ],
+    },
+    {
+      provider,
+      promptIncludesAll: [
+        "Continue Roscoe's targeted refinement of the saved project brief",
+        "The user securely provided CF_API_TOKEN.",
+      ],
+      resumeId: sessionId,
+      sessionId,
+      text: [
+        "Roscoe has what it needs.\n\n",
+        "---BRIEF---\n",
+        '{"name":"Secret Project","directory":"/ignored","goals":["Ship previews safely"],"milestones":["v1"],"techStack":["TypeScript"],"notes":"Need a deployment token for preview infrastructure.","intentBrief":{"projectStory":"Ship previews safely","primaryUsers":["operators"],"definitionOfDone":["Previews can be created and validated."],"acceptanceChecks":["The preview flow can be executed safely."],"successSignals":["Operators can verify builds."],"deliveryPillars":{"frontend":["Preview UI is understandable."],"backend":["Preview API calls work safely."],"unitComponentTests":["Vitest covers the changed preview logic, regressions, and important failure modes at a reasonable level."],"e2eTests":["Playwright covers the preview workflow and critical failure modes at the right stage."]},"coverageMechanism":["Vitest and Playwright"],"nonGoals":["No production rollout work."],"constraints":["Keep secrets local."],"architecturePrinciples":["Keep deployment credentials behind explicit env seams."],"autonomyRules":["Ask before broadening scope."],"qualityBar":["Use reasonable, risk-based proof of changed preview behavior, regressions, and failure modes before calling the slice done."],"riskBoundaries":["Do not leak secrets into logs or committed files."],"uiDirection":""}}',
         "\n---END_BRIEF---",
       ],
     },

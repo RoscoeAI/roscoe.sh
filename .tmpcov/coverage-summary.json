@@ -1,0 +1,3 @@
+{"total": {"lines":{"total":317,"covered":277,"skipped":0,"pct":87.38},"statements":{"total":371,"covered":290,"skipped":0,"pct":78.16},"functions":{"total":42,"covered":22,"skipped":0,"pct":52.38},"branches":{"total":308,"covered":208,"skipped":0,"pct":67.53},"branchesTrue":{"total":0,"covered":0,"skipped":0,"pct":"Unknown"}}
+,"/Users/timheckel/Projects/node/roscoe/roscoe.sh/src/app.tsx": {"lines":{"total":317,"covered":277,"skipped":0,"pct":87.38},"functions":{"total":42,"covered":22,"skipped":0,"pct":52.38},"statements":{"total":371,"covered":290,"skipped":0,"pct":78.16},"branches":{"total":308,"covered":208,"skipped":0,"pct":67.53}}
+}

@@ -1,9 +1,11 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import { createServer, IncomingMessage, Server, ServerResponse } from "http";
 import { loadRoscoeSettings } from "./config.js";
+import { getHostedRelayClient } from "./hosted-relay-client.js";
 import { ManagedSession } from "./types.js";
 
 const DEFAULT_PROGRESS_COOLDOWN_MS = 5 * 60_000;
+const DEFAULT_INTERVENTION_COOLDOWN_MS = 10 * 60_000;
 const DEFAULT_WEBHOOK_PORT = 8787;
 const DEFAULT_WEBHOOK_PATH = "/twilio/sms";
 const TEST_STATUS_POLL_ATTEMPTS = process.env.NODE_ENV === "test" ? 3 : 4;
@@ -15,6 +17,8 @@ export interface NotificationStatus {
   phoneNumber: string;
   provider: "twilio";
   providerReady: boolean;
+  consentAcknowledged: boolean;
+  consentReady: boolean;
   summary: string;
   inboundMode: "poll" | "webhook";
   inboundDetail: string;
@@ -37,6 +41,11 @@ interface SentProgressState {
   signature: string;
   percent: number;
   urls: string[];
+}
+
+interface SentInterventionState {
+  at: number;
+  signature: string;
 }
 
 type TwilioMessageStatus =
@@ -107,6 +116,11 @@ export interface IncomingSmsReply {
   matchedQuestion?: string;
 }
 
+export interface SmsInterventionRequest {
+  kind: "needs-review" | "manual-input" | "error" | "paused";
+  detail: string;
+}
+
 interface PendingSmsQuestion {
   token: string;
   sessionId: string;
@@ -133,6 +147,10 @@ function cleanPhoneNumber(value: string): string {
 function extractUrls(text: string): string[] {
   const matches = text.match(/https?:\/\/[^\s)>\]]+/g) ?? [];
   return Array.from(new Set(matches.map((url) => url.replace(/[.,;:!?]+$/, "")))).slice(0, 2);
+}
+
+function hasSmsConsentConfigured(settings: ReturnType<typeof loadRoscoeSettings>): boolean {
+  return settings.notifications.consentAcknowledged;
 }
 
 function estimateProgress(summary: string, transcript: string): ProgressEstimate {
@@ -325,6 +343,7 @@ function validateTwilioSignature(
 
 export class NotificationService {
   private lastSentBySession = new Map<string, SentProgressState>();
+  private lastInterventionBySession = new Map<string, SentInterventionState>();
   private pendingQuestions = new Map<string, PendingSmsQuestion>();
   private seenInboundSids = new Set<string>();
   private webhookReplies: IncomingSmsReply[] = [];
@@ -352,23 +371,30 @@ export class NotificationService {
     const settings = loadRoscoeSettings();
     const twilio = readTwilioConfig();
     const phoneNumber = cleanPhoneNumber(settings.notifications.phoneNumber);
-    const providerReady = twilio !== null;
-    const enabled = settings.notifications.enabled && phoneNumber.length > 0 && providerReady;
+    const providerReady = settings.notifications.deliveryMode === "roscoe-hosted" || twilio !== null;
+    const consentReady = hasSmsConsentConfigured(settings);
+    const enabled = settings.notifications.enabled && phoneNumber.length > 0 && providerReady && consentReady;
     const inbound = this.getInboundTransport();
 
     const summary = !phoneNumber
       ? "Add a phone number to receive Roscoe updates."
+      : !settings.notifications.consentAcknowledged
+        ? "Review and accept the SMS consent notice before enabling the SMS wire."
+      : settings.notifications.deliveryMode === "roscoe-hosted"
+        ? "Roscoe routes SMS through roscoe.sh and relays inbound texts back into this CLI."
       : !providerReady
         ? "Twilio env vars are missing."
         : settings.notifications.enabled
-          ? "Roscoe will text milestone updates."
-          : "Phone saved; SMS updates are paused.";
+          ? "Roscoe will text milestones, intervention requests, and accept SMS check-ins."
+          : "Phone saved; SMS wire is paused.";
 
     return {
       enabled,
       phoneNumber,
       provider: "twilio",
       providerReady,
+      consentAcknowledged: settings.notifications.consentAcknowledged,
+      consentReady,
       summary,
       inboundMode: inbound.mode,
       inboundDetail: inbound.detail,
@@ -414,7 +440,12 @@ export class NotificationService {
   }
 
   async readIncomingReplies(): Promise<IncomingSmsReply[]> {
-    if (!this.hasPendingQuestions()) return [];
+    const settings = loadRoscoeSettings();
+    const phoneNumber = cleanPhoneNumber(settings.notifications.phoneNumber);
+    if ((!settings.notifications.enabled && !this.hasPendingQuestions()) || !phoneNumber) return [];
+    if (settings.notifications.deliveryMode === "roscoe-hosted") {
+      return [];
+    }
     await this.ensureInboundTransportReady();
     const transport = this.getInboundTransport();
     if (transport.mode === "webhook" && this.webhookServer) {
@@ -435,6 +466,15 @@ export class NotificationService {
         detail: "Add a phone number before sending a test SMS.",
       };
     }
+    if (!settings.notifications.consentAcknowledged) {
+      return {
+        ok: false,
+        accepted: false,
+        delivered: false,
+        status: "unknown",
+        detail: "Review and acknowledge the SMS consent notice before sending SMS.",
+      };
+    }
 
     return this.sendSms(
       phoneNumber,
@@ -449,7 +489,7 @@ export class NotificationService {
   ): Promise<boolean> {
     const settings = loadRoscoeSettings();
     const phoneNumber = cleanPhoneNumber(settings.notifications.phoneNumber);
-    if (!settings.notifications.enabled || !phoneNumber || summary === "(summary unavailable)") {
+    if (!settings.notifications.enabled || !phoneNumber || !hasSmsConsentConfigured(settings) || summary === "(summary unavailable)") {
       return false;
     }
 
@@ -486,6 +526,49 @@ export class NotificationService {
     return true;
   }
 
+  async maybeSendInterventionRequest(
+    session: ManagedSession,
+    request: SmsInterventionRequest,
+  ): Promise<boolean> {
+    const settings = loadRoscoeSettings();
+    const phoneNumber = cleanPhoneNumber(settings.notifications.phoneNumber);
+    const detail = request.detail.replace(/\s+/g, " ").trim();
+    if (!settings.notifications.enabled || !phoneNumber || !hasSmsConsentConfigured(settings) || !detail) {
+      return false;
+    }
+
+    const signature = `${request.kind}|${detail}`;
+    const previous = this.lastInterventionBySession.get(session.id);
+    const now = Date.now();
+    if (previous?.signature === signature && now - previous.at < DEFAULT_INTERVENTION_COOLDOWN_MS) {
+      return false;
+    }
+
+    const scope = session.worktreeName === "main"
+      ? session.projectName
+      : `${session.projectName}/${session.worktreeName}`;
+    const preface = request.kind === "needs-review"
+      ? "Roscoe needs review"
+      : request.kind === "manual-input"
+        ? "Roscoe needs your instruction"
+        : request.kind === "error"
+          ? "Roscoe hit an error and needs your help"
+          : "Roscoe is paused on a blocker";
+    const replyHelp = request.kind === "needs-review"
+      ? "Reply \"approve\" to send it, \"hold\" to keep it unsent, or text \"status\" for a quick update."
+      : request.kind === "paused"
+        ? "Reply \"resume\" once the blocker is clear, send new guidance, or text \"status\" for a quick update."
+        : "Reply here with guidance, or text \"status\" for a quick update.";
+    const body = `${preface} on ${scope}: ${detail} ${replyHelp}`;
+
+    await this.sendOperatorMessage(body);
+    this.lastInterventionBySession.set(session.id, {
+      at: now,
+      signature,
+    });
+    return true;
+  }
+
   async sendQuestion(
     session: ManagedSession,
     question: string,
@@ -493,7 +576,7 @@ export class NotificationService {
     const settings = loadRoscoeSettings();
     const phoneNumber = cleanPhoneNumber(settings.notifications.phoneNumber);
     const cleanQuestion = question.replace(/\s+/g, " ").trim();
-    if (!cleanQuestion || !phoneNumber) {
+    if (!cleanQuestion || !phoneNumber || !hasSmsConsentConfigured(settings)) {
       return {
         ok: false,
         accepted: false,
@@ -504,7 +587,9 @@ export class NotificationService {
         renderedQuestion: "",
         detail: !cleanQuestion
           ? "Roscoe could not find a clear question to text."
-          : "Add a phone number before sending an SMS question.",
+          : !phoneNumber
+            ? "Add a phone number before sending an SMS question."
+            : "Accept the SMS consent notice before Roscoe texts questions.",
       };
     }
 
@@ -538,11 +623,55 @@ export class NotificationService {
     };
   }
 
+  async sendOperatorMessage(body: string): Promise<SmsSendResult> {
+    const settings = loadRoscoeSettings();
+    const phoneNumber = cleanPhoneNumber(settings.notifications.phoneNumber);
+    if (!phoneNumber) {
+      return {
+        ok: false,
+        accepted: false,
+        delivered: false,
+        status: "unknown",
+        detail: "Add a phone number before Roscoe can text this wire.",
+      };
+    }
+    if (!hasSmsConsentConfigured(settings)) {
+      return {
+        ok: false,
+        accepted: false,
+        delivered: false,
+        status: "unknown",
+        detail: "Accept the SMS consent notice before Roscoe can text this wire.",
+      };
+    }
+
+    const normalizedBody = body.replace(/\s+/g, " ").trim();
+    if (!normalizedBody) {
+      return {
+        ok: false,
+        accepted: false,
+        delivered: false,
+        status: "unknown",
+        detail: "Roscoe could not build a message to text.",
+      };
+    }
+
+    const limitedBody = normalizedBody.length > 620
+      ? `${normalizedBody.slice(0, 617).trimEnd()}...`
+      : normalizedBody;
+
+    return this.sendSms(
+      phoneNumber,
+      limitedBody,
+      { pollForFinalStatus: false },
+    );
+  }
+
   private async pollIncomingReplies(): Promise<IncomingSmsReply[]> {
     const settings = loadRoscoeSettings();
     const phoneNumber = cleanPhoneNumber(settings.notifications.phoneNumber);
     const twilio = readTwilioConfig();
-    if (!phoneNumber || !twilio) return [];
+    if (!phoneNumber || !twilio || !hasSmsConsentConfigured(settings)) return [];
 
     const query = new URLSearchParams();
     query.set("From", phoneNumber);
@@ -583,6 +712,36 @@ export class NotificationService {
     body: string,
     options: { pollForFinalStatus?: boolean } = {},
   ): Promise<SmsSendResult> {
+    const settings = loadRoscoeSettings();
+    if (settings.notifications.deliveryMode === "roscoe-hosted") {
+      const phoneNumber = cleanPhoneNumber(settings.notifications.phoneNumber);
+      if (phoneNumber !== cleanPhoneNumber(to)) {
+        return {
+          ok: false,
+          accepted: false,
+          delivered: false,
+          status: "unknown",
+          detail: "Hosted relay is linked to a different phone number.",
+        };
+      }
+
+      const result = await getHostedRelayClient().sendOperatorSms(body);
+      return {
+        ok: result.ok,
+        accepted: result.ok,
+        delivered: result.delivered === true,
+        status: (result.status as TwilioMessageStatus | undefined) ?? "unknown",
+        sid: result.sid,
+        errorCode: typeof result.errorCode === "number" ? result.errorCode : null,
+        errorMessage: result.errorMessage ?? result.error ?? null,
+        detail: result.ok
+          ? result.delivered
+            ? "Hosted relay SMS delivered."
+            : `Hosted relay SMS ${result.status ?? "submitted"}.`
+          : result.error ?? "Hosted relay SMS failed.",
+      };
+    }
+
     const twilio = readTwilioConfig();
     if (!twilio) {
       throw new Error("Twilio SMS is not configured.");
@@ -813,21 +972,22 @@ export class NotificationService {
   }
 
   private mapInboundReply(message: TwilioMessageRecord): IncomingSmsReply | null {
+    const configuredPhone = cleanPhoneNumber(loadRoscoeSettings().notifications.phoneNumber);
     const sid = message.sid?.trim();
     const body = message.body?.trim();
-    const from = message.from?.trim();
+    const from = cleanPhoneNumber(message.from?.trim() ?? "");
     if (!sid || !body || !from) return null;
+    if (configuredPhone && from !== configuredPhone) return null;
 
     const tokenMatch = body.match(/\[(R\d+)\]/i);
     const normalizedToken = tokenMatch ? `[${tokenMatch[1].toUpperCase()}]` : undefined;
+    const matchedTokenText = tokenMatch?.[0];
     let pending = normalizedToken ? this.pendingQuestions.get(normalizedToken) : undefined;
     if (!pending && this.pendingQuestions.size === 1) {
       pending = Array.from(this.pendingQuestions.values())[0];
     }
-    if (!pending) return null;
-
-    const answerText = normalizedToken
-      ? body.replace(normalizedToken, "").trim()
+    const answerText = matchedTokenText
+      ? body.replace(matchedTokenText, "").trim()
       : body.trim();
 
     return {
@@ -837,9 +997,9 @@ export class NotificationService {
       from,
       to: message.to?.trim(),
       receivedAt: messageTimestamp(message) || Date.now(),
-      token: pending.token,
-      matchedSessionId: pending.sessionId,
-      matchedQuestion: pending.question,
+      token: pending?.token,
+      matchedSessionId: pending?.sessionId,
+      matchedQuestion: pending?.question,
     };
   }
 }

@@ -1,15 +1,41 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import { existsSync } from "fs";
 import { Box, Text, useInput } from "ink";
 import { Select, TextInput, Spinner, StatusMessage } from "@inkjs/ui";
 import { useAppContext } from "../app.js";
-import { listProjectHistory, listRegisteredProjects, listProfiles, loadProfile, loadProjectContext } from "../config.js";
+import {
+  listLaneSessions,
+  listProjectHistory,
+  listRegisteredProjects,
+  listProfiles,
+  loadRoscoeSettings,
+  loadProfile,
+  loadProjectContext,
+  ResponderApprovalMode,
+  resolveProjectRoot,
+} from "../config.js";
+import { filterProfilesBySelectableProviders } from "../provider-registry.js";
 import { WorktreeManager } from "../worktree-manager.js";
 import { basename } from "path";
 import { homedir } from "os";
 import { Divider, KeyHints, Panel, Pill } from "./chrome.js";
 import { detectProtocol, summarizeRuntime } from "../llm-runtime.js";
-import { getLockedProjectProvider, getWorkerProfileForProject } from "../runtime-defaults.js";
+import {
+  getExecutionModeLabel,
+  formatResponderApprovalLabel,
+  formatWorkerGovernanceLabel,
+  formatTokenEfficiencyLabel,
+  getGuildProvider,
+  getResponderApprovalMode,
+  getResponderProvider,
+  getTokenEfficiencyMode,
+  getWorkerGovernanceMode,
+  getWorkerProfileForProject,
+} from "../runtime-defaults.js";
 import { ProjectBriefView } from "./project-brief.js";
+import type { SessionStartOpts } from "../types.js";
+import { getRestoredSuggestionPhase, sortTranscriptEntries } from "../session-transcript.js";
+import { getPreviewState } from "../session-preview.js";
 
 type Step = "project" | "brief" | "profile" | "worktree" | "add-more" | "auto-mode";
 const ONBOARD_PROJECT_VALUE = "__onboard_project__";
@@ -22,6 +48,8 @@ const stepNumber: Record<Step, number> = {
   "add-more": 5,
   "auto-mode": 6,
 };
+
+const totalSetupSteps = Object.keys(stepNumber).length;
 
 export function getPreviousSetupStep(step: Step): Step | "home" {
   if (step === "project") return "home";
@@ -41,6 +69,46 @@ interface PendingSpec {
   runtimeSummary: string;
 }
 
+interface SessionSetupBootstrap {
+  projects: ReturnType<typeof listRegisteredProjects>;
+  roscoeSettings: ReturnType<typeof loadRoscoeSettings>;
+  autoHealMetadata: boolean;
+  allProfiles: ReturnType<typeof listProfiles>;
+  profiles: string[];
+  currentProjectDir: string;
+  initialProject: { name: string; directory: string } | null;
+  initialProjectContext: ReturnType<typeof loadProjectContext>;
+}
+
+function buildSessionSetupBootstrap(preselectedProjectDir?: string): SessionSetupBootstrap {
+  const projects = listRegisteredProjects();
+  const roscoeSettings = loadRoscoeSettings();
+  const autoHealMetadata = roscoeSettings.behavior.autoHealMetadata;
+  const allProfiles = listProfiles();
+  const configuredProfiles = filterProfilesBySelectableProviders(allProfiles, roscoeSettings);
+  const profiles = configuredProfiles.length > 0 ? configuredProfiles : allProfiles;
+  const currentProjectDir = resolveProjectRoot(process.cwd());
+  const initialProjectDir = preselectedProjectDir ? resolveProjectRoot(preselectedProjectDir) : null;
+  const initialProject = initialProjectDir
+    ? {
+        name: projects.find((project) => project.directory === initialProjectDir)?.name ?? basename(initialProjectDir),
+        directory: initialProjectDir,
+      }
+    : null;
+  const initialProjectContext = initialProject ? loadProjectContext(initialProject.directory) : null;
+
+  return {
+    projects,
+    roscoeSettings,
+    autoHealMetadata,
+    allProfiles,
+    profiles,
+    currentProjectDir,
+    initialProject,
+    initialProjectContext,
+  };
+}
+
 function formatWorktreeLabel(name: string): string {
   return name === "main" ? "main repo" : `worktree - ${name}`;
 }
@@ -58,59 +126,134 @@ function formatDate(iso: string): string {
 
 interface SessionSetupProps {
   preselectedProjectDir?: string;
+  openedFromSessionView?: boolean;
 }
 
-export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
-  const { dispatch, service } = useAppContext();
+export function SessionSetup({ preselectedProjectDir, openedFromSessionView = false }: SessionSetupProps) {
+  const { dispatch, service, state } = useAppContext();
 
-  const projects = listRegisteredProjects();
-  const profiles = listProfiles();
-  const initialProject = preselectedProjectDir
-    ? {
-        name: projects.find((project) => project.directory === preselectedProjectDir)?.name ?? basename(preselectedProjectDir),
-        directory: preselectedProjectDir,
-      }
-    : null;
-  const initialProjectContext = initialProject ? loadProjectContext(initialProject.directory) : null;
-
-  const [step, setStep] = useState<Step>(initialProjectContext ? "brief" : initialProject ? "profile" : "project");
-  const [selectedProject, setSelectedProject] = useState<{ name: string; directory: string } | null>(initialProject);
+  const bootstrap = useMemo(() => buildSessionSetupBootstrap(preselectedProjectDir), [preselectedProjectDir]);
+  const [step, setStep] = useState<Step>(() =>
+    bootstrap.initialProjectContext ? "brief" : bootstrap.initialProject ? "profile" : "project",
+  );
+  const [selectedProject, setSelectedProject] = useState<{ name: string; directory: string } | null>(
+    () => bootstrap.initialProject,
+  );
   const [selectedProfile, setSelectedProfile] = useState<string>("");
   const [pendingSpecs, setPendingSpecs] = useState<PendingSpec[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [creatingWorktree, setCreatingWorktree] = useState(false);
   const [worktreeResetKey, setWorktreeResetKey] = useState(0);
+
+  useEffect(() => {
+    setSelectedProject(bootstrap.initialProject);
+    setStep(bootstrap.initialProjectContext ? "brief" : bootstrap.initialProject ? "profile" : "project");
+    setSelectedProfile("");
+    setPendingSpecs([]);
+    setError(null);
+    setCreatingWorktree(false);
+    setWorktreeResetKey(0);
+  }, [bootstrap]);
+
+  const {
+    projects,
+    roscoeSettings,
+    autoHealMetadata,
+    allProfiles,
+    profiles,
+    currentProjectDir,
+  } = bootstrap;
   const latestPending = pendingSpecs[pendingSpecs.length - 1];
   const selectedProjectContext = selectedProject ? loadProjectContext(selectedProject.directory) : null;
+  const selectedProjectLabel = selectedProject?.name ?? "this project";
   const selectedProjectHistory = useMemo(
     () => selectedProject ? listProjectHistory(selectedProject.directory) : [],
     [selectedProject],
   );
-  const lockedProvider = getLockedProjectProvider(selectedProjectContext);
-  const allowedProfiles = lockedProvider
-    ? profiles.filter((profileName) => detectProtocol(loadProfile(profileName)) === lockedProvider)
+  const resumableLane = useMemo(() => {
+    if (!selectedProject) return null;
+
+    const lanes = Array.from(
+      listLaneSessions(selectedProject.directory)
+        .filter((record) => !autoHealMetadata || record.status !== "exited")
+        .filter((record) => record.worktreeName === "main" || existsSync(record.worktreePath))
+        .reduce((byLane, record) => {
+          const laneIdentity = [
+            record.projectDir,
+            record.worktreePath,
+            record.worktreeName,
+            record.profileName,
+          ].join("::");
+          const existing = byLane.get(laneIdentity);
+          if (!existing || record.savedAt > existing.savedAt) {
+            byLane.set(laneIdentity, record);
+          }
+          return byLane;
+        }, new Map<string, ReturnType<typeof listLaneSessions>[number]>())
+        .values(),
+    );
+
+    return lanes.length === 1 ? lanes[0] : null;
+  }, [autoHealMetadata, selectedProject]);
+  const guildProvider = getGuildProvider(selectedProjectContext);
+  const responderProvider = getResponderProvider(selectedProjectContext);
+  const savedGuildRuntime = guildProvider
+    ? selectedProjectContext?.runtimeDefaults?.workerByProtocol?.[guildProvider]
+    : null;
+  const selectedProjectResponderApprovalMode = selectedProjectContext
+    ? getResponderApprovalMode(selectedProjectContext)
+    : null;
+  const allowedProfiles = guildProvider
+    ? filterProfilesBySelectableProviders(allProfiles, roscoeSettings, [guildProvider])
+        .filter((profileName) => detectProtocol(loadProfile(profileName)) === guildProvider)
     : profiles;
+  const briefContinueLabel = resumableLane
+    ? `Continue with saved lane in ${selectedProjectLabel}`
+    : allowedProfiles.length === 1
+      ? openedFromSessionView
+        ? `Continue with new lane in ${selectedProjectLabel}`
+        : `Continue in ${selectedProjectLabel}`
+      : `Continue to runtime selection for ${selectedProjectLabel}`;
 
   const projectItems = [
     ...projects.map((p) => ({
       label: `${p.name}  ${shortenPath(p.directory)} · ${formatDate(p.lastActive)}`,
       value: p.directory,
     })),
-    { label: `Current directory  ${shortenPath(process.cwd())}`, value: process.cwd() },
+    {
+      label: `${currentProjectDir === process.cwd() ? "Current directory" : "Current repo root"}  ${shortenPath(currentProjectDir)}`,
+      value: currentProjectDir,
+    },
     { label: "Onboard another project  run Roscoe's intake first", value: ONBOARD_PROJECT_VALUE },
   ];
 
   const profileItems = allowedProfiles.map((p) => ({ label: p, value: p }));
 
   const addMoreItems = [
-    { label: "Yes — add another session", value: "yes" },
-    { label: "No — proceed to start", value: "no" },
+    { label: "No — start these lanes", value: "no" },
+    { label: "Yes — add another lane", value: "yes" },
   ];
 
   const autoModeItems = [
-    { label: "Yes — auto-send high-confidence suggestions", value: "yes" },
-    { label: "No — always ask for approval", value: "no" },
+    { label: "Roscoe decides for me when confidence is high", value: "yes" },
+    { label: "Roscoe always asks me before replying", value: "no" },
   ];
+
+  const getQueuedSavedApprovalMode = (): ResponderApprovalMode | null => {
+    if (pendingSpecs.length === 0) return null;
+    const modes = pendingSpecs.map((spec) => getResponderApprovalMode(loadProjectContext(spec.projectDir)));
+    if (modes.some((mode) => mode === null)) return null;
+    return modes.every((mode) => mode === modes[0]) ? modes[0] : null;
+  };
+
+  const applyApprovalModeAndLaunch = (mode: ResponderApprovalMode | null, specs: SessionStartOpts[]) => {
+    if (mode === "auto" || mode === "manual") {
+      dispatch({ type: "SET_AUTO_MODE", enabled: mode === "auto" });
+    } else if (!state.autoModeConfigured) {
+      dispatch({ type: "SET_AUTO_MODE", enabled: true });
+    }
+    launchSessions(specs);
+  };
 
   const handleProjectSelect = (value: string) => {
     if (value === ONBOARD_PROJECT_VALUE) {
@@ -118,10 +261,11 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
       return;
     }
 
-    const proj = projects.find((p) => p.directory === value);
+    const projectDir = resolveProjectRoot(value);
+    const proj = projects.find((p) => p.directory === projectDir);
     const nextProject = {
-      name: proj?.name ?? basename(value),
-      directory: value,
+      name: proj?.name ?? basename(projectDir),
+      directory: projectDir,
     };
     setSelectedProject(nextProject);
     setStep(loadProjectContext(nextProject.directory) ? "brief" : "profile");
@@ -131,6 +275,19 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
     setError(null);
 
     if (creatingWorktree) return;
+
+    if (step === "project" && pendingSpecs.length > 0) {
+      const lastQueuedSpec = pendingSpecs[pendingSpecs.length - 1];
+      if (lastQueuedSpec) {
+        setSelectedProject({
+          name: lastQueuedSpec.projectName,
+          directory: lastQueuedSpec.projectDir,
+        });
+        setSelectedProfile(lastQueuedSpec.profileName);
+      }
+      setStep("add-more");
+      return;
+    }
 
     const previousStep = getPreviousSetupStep(step);
 
@@ -235,16 +392,29 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
       setSelectedProfile("");
       setStep("project");
     } else {
+      const savedApprovalMode = getQueuedSavedApprovalMode();
+      if (savedApprovalMode) {
+        applyApprovalModeAndLaunch(savedApprovalMode, pendingSpecs.map(({ profileName, projectDir, projectName, worktreePath, worktreeName }) => ({
+          profileName,
+          projectDir,
+          projectName,
+          worktreePath,
+          worktreeName,
+        })));
+        return;
+      }
       setStep("auto-mode");
     }
   };
 
-  const handleAutoMode = (value: string) => {
-    const autoEnabled = value === "yes";
-    dispatch({ type: "SET_AUTO_MODE", enabled: autoEnabled });
-
-    for (const spec of pendingSpecs) {
+  const launchSessions = (specs: SessionStartOpts[]) => {
+    let lastStartedId: string | null = null;
+    for (const spec of specs) {
       const { managed, restoredState } = service.startSession(spec);
+      lastStartedId = managed.id;
+      const restoredSuggestion = getRestoredSuggestionPhase(restoredState?.timeline ?? []);
+      const restoredStatus = restoredState?.status
+        ?? (restoredSuggestion.kind === "ready" ? "review" : "active");
       dispatch({
         type: "ADD_SESSION",
         session: {
@@ -252,13 +422,26 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
           profileName: managed.profileName,
           projectName: managed.projectName,
           worktreeName: managed.worktreeName,
-          status: "active",
+          startedAt: restoredState?.startedAt && restoredState.startedAt !== new Date(0).toISOString()
+            ? restoredState.startedAt
+            : new Date().toISOString(),
+          status: restoredStatus,
           outputLines: restoredState?.outputLines ?? [],
-          suggestion: { kind: "idle" },
+          suggestion: restoredSuggestion,
           managed,
           summary: restoredState?.summary ?? null,
           currentToolUse: restoredState?.currentToolUse ?? null,
-          timeline: restoredState?.timeline ?? [],
+          currentToolDetail: restoredState?.currentToolDetail ?? null,
+          usage: restoredState?.usage ?? {
+            inputTokens: 0,
+            outputTokens: 0,
+            cachedInputTokens: 0,
+            cacheCreationInputTokens: 0,
+          },
+          rateLimitStatus: restoredState?.rateLimitStatus ?? null,
+          timeline: sortTranscriptEntries(restoredState?.timeline ?? []),
+          preview: getPreviewState(restoredState?.preview),
+          pendingOperatorMessages: restoredState?.pendingOperatorMessages ?? [],
           viewMode: "transcript",
           scrollOffset: 0,
           followLive: true,
@@ -266,32 +449,79 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
       });
     }
 
+    if (lastStartedId) {
+      dispatch({ type: "SET_ACTIVE", id: lastStartedId });
+    }
     dispatch({ type: "SET_SCREEN", screen: "session-view" });
+  };
+
+  const handleAutoMode = (value: string) => {
+    const autoEnabled = value === "yes";
+    applyApprovalModeAndLaunch(autoEnabled ? "auto" : "manual", pendingSpecs.map(({ profileName, projectDir, projectName, worktreePath, worktreeName }) => ({
+      profileName,
+      projectDir,
+      projectName,
+      worktreePath,
+      worktreeName,
+    })));
+  };
+
+  const handleBriefContinue = () => {
+    if (resumableLane && selectedProject) {
+      applyApprovalModeAndLaunch(selectedProjectResponderApprovalMode, [{
+        profileName: resumableLane.profileName,
+        projectDir: selectedProject.directory,
+        projectName: selectedProject.name,
+        worktreePath: resumableLane.worktreePath,
+        worktreeName: resumableLane.worktreeName,
+      }]);
+      return;
+    }
+
+    if (allowedProfiles.length === 1) {
+      setSelectedProfile(allowedProfiles[0]);
+      setStep("worktree");
+      return;
+    }
+
+    setStep("profile");
   };
 
   return (
     <Box flexDirection="column" padding={1} gap={1}>
       <Panel
-        title="Session Setup"
-        subtitle="Assemble a working stack of monitored sessions"
+        title="Lane Setup"
+        subtitle="Assemble a working stack of monitored lanes"
         accentColor="yellow"
-        rightLabel={`Step ${stepNumber[step]}/5`}
+        rightLabel={`Step ${stepNumber[step]}/${totalSetupSteps}`}
       >
         <Box gap={1} flexWrap="wrap">
           <Pill label={selectedProject?.name ?? "project"} color={selectedProject ? "cyan" : "gray"} />
-          <Pill label={selectedProfile || "profile"} color={selectedProfile ? "cyan" : "gray"} />
+          <Pill label={selectedProfile || "runtime"} color={selectedProfile ? "cyan" : "gray"} />
           <Pill
             label={latestPending ? formatWorktreeLabel(latestPending.worktreeName) : "main or worktree"}
             color={latestPending ? (latestPending.worktreeName === "main" ? "gray" : "yellow") : "gray"}
           />
-          <Pill label={pendingSpecs.length === 0 ? "0 configured" : `${pendingSpecs.length} configured`} color={pendingSpecs.length > 0 ? "green" : "gray"} />
+          <Pill
+            label={
+              pendingSpecs.length === 0
+                ? "0 lanes"
+                : `${pendingSpecs.length} lane${pendingSpecs.length === 1 ? "" : "s"}`
+            }
+            color={pendingSpecs.length > 0 ? "green" : "gray"}
+          />
         </Box>
         <Box marginTop={1}>
           <KeyHints
             items={[
               { keyLabel: "Enter", description: "confirm selection" },
               { keyLabel: "blank worktree", description: "use main repo" },
-              { keyLabel: "Esc", description: step === "project" ? "back to dispatch board" : "back one step" },
+              {
+                keyLabel: "Esc",
+                description: step === "project" && pendingSpecs.length === 0
+                  ? "back to dispatch board"
+                  : "back one step",
+              },
             ]}
           />
         </Box>
@@ -308,10 +538,10 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
         subtitle={
           step === "project" ? "Pick a remembered repo, use the current directory, or onboard a new one." :
           step === "brief" ? "Review the saved Roscoe understanding before you continue." :
-          step === "profile" ? "Choose the LLM runtime for this session." :
+          step === "profile" ? "Choose the Guild runtime CLI for this lane." :
           step === "worktree" ? "Name a task branch or stay on main." :
           step === "add-more" ? "Decide whether to add another lane." :
-          "Choose how assertive the system should be."
+          "Choose how Roscoe should interact with you for this launch."
         }
         accentColor={step === "auto-mode" ? "green" : "gray"}
       >
@@ -323,17 +553,17 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
         )}
 
         {step === "brief" && selectedProjectContext && selectedProject && (
-          <ProjectBriefView
+            <ProjectBriefView
             context={selectedProjectContext}
             history={selectedProjectHistory}
             actionItems={[
-              { label: "Continue to profile selection", value: "continue" },
+              { label: briefContinueLabel, value: "continue" },
               { label: "Refine Understanding", value: "refine" },
               { label: "Back", value: "back" },
             ]}
             onAction={(value) => {
               if (value === "continue") {
-                setStep("profile");
+                handleBriefContinue();
                 return;
               }
               if (value === "refine") {
@@ -357,15 +587,27 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
 
         {step === "profile" && (
           <Box flexDirection="column">
-            <Text color="yellow" bold>Select a profile:</Text>
+            <Text color="yellow" bold>Select a runtime:</Text>
             {selectedProject && (
               <>
                 <Text dimColor>
-                  Saved runtime defaults will be applied from onboarding when the session launches.
+                  This chooses the Guild worker CLI/provider, not the model ID. Saved model and reasoning defaults will still be applied when the lane launches.
                 </Text>
-                {lockedProvider && (
+                {guildProvider && (
                   <Text dimColor>
-                    Provider is locked to <Text color="cyan">{lockedProvider}</Text> for this project. Guild lanes can still retune model and reasoning inside that provider.
+                    Guild lanes launch on <Text color="cyan">{guildProvider}</Text>{responderProvider ? <> while Roscoe drafts on <Text color="magenta">{responderProvider}</Text></> : null}. Guild lanes can still retune model and reasoning inside their provider.
+                  </Text>
+                )}
+                {selectedProjectContext && (
+                  <Text dimColor>
+                    {savedGuildRuntime ? (
+                      <>
+                        Saved access: <Text color="cyan">{getExecutionModeLabel(savedGuildRuntime)}</Text> ·{" "}
+                      </>
+                    ) : "Saved controls: "}
+                    <Text color="cyan">{formatWorkerGovernanceLabel(getWorkerGovernanceMode(selectedProjectContext))}</Text> ·{" "}
+                    <Text color="cyan">{formatTokenEfficiencyLabel(getTokenEfficiencyMode(selectedProjectContext))}</Text> ·{" "}
+                    <Text color="cyan">{formatResponderApprovalLabel(getResponderApprovalMode(selectedProjectContext) ?? "auto")}</Text>
                   </Text>
                 )}
               </>
@@ -396,7 +638,7 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
 
         {step === "add-more" && (
           <Box flexDirection="column">
-            <Text color="yellow" bold>Add another session?</Text>
+            <Text color="yellow" bold>Add another lane?</Text>
             <Select options={addMoreItems} onChange={handleAddMore} />
           </Box>
         )}
@@ -404,21 +646,19 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
         {step === "auto-mode" && (
           <Box flexDirection="column">
             <Text color="yellow" bold>
-              Enable auto-send for high-confidence suggestions?
+              How should Roscoe handle high-confidence replies?
             </Text>
             <Select options={autoModeItems} onChange={handleAutoMode} />
           </Box>
         )}
       </Panel>
 
-      <Panel
-        title="Launch Preview"
-        subtitle="The stack that will be created when you continue"
-        rightLabel={pendingSpecs.length === 0 ? "nothing queued" : `${pendingSpecs.length} queued`}
-      >
-        {pendingSpecs.length === 0 ? (
-          <Text dimColor>No sessions configured yet.</Text>
-        ) : (
+      {pendingSpecs.length > 0 && step !== "add-more" && (
+        <Panel
+          title="Lane Preview"
+          subtitle="The lane stack that will be created when you continue"
+          rightLabel={`${pendingSpecs.length} queued`}
+        >
           <Box flexDirection="column">
             {pendingSpecs.map((spec, index) => (
               <Box key={`${spec.projectDir}-${spec.profileName}-${spec.worktreeName}`} flexDirection="column">
@@ -435,8 +675,8 @@ export function SessionSetup({ preselectedProjectDir }: SessionSetupProps) {
               </Box>
             ))}
           </Box>
-        )}
-      </Panel>
+        </Panel>
+      )}
     </Box>
   );
 }

@@ -39,9 +39,9 @@ export function wrapLine(text: string, width: number): string[] {
 
   for (const word of words) {
     if (!current) {
-      const parts = wrapWord(word, safeWidth);
-      current = parts.shift() ?? "";
-      for (const part of parts) {
+      const [first, ...rest] = wrapWord(word, safeWidth);
+      current = first;
+      for (const part of rest) {
         lines.push(current);
         current = part;
       }
@@ -54,16 +54,16 @@ export function wrapLine(text: string, width: number): string[] {
     }
 
     lines.push(current);
-    const parts = wrapWord(word, safeWidth);
-    current = parts.shift() ?? "";
-    for (const part of parts) {
+    const [first, ...rest] = wrapWord(word, safeWidth);
+    current = first;
+    for (const part of rest) {
       lines.push(current);
       current = part;
     }
   }
 
-  if (current) lines.push(current);
-  return lines.length > 0 ? lines : [""];
+  lines.push(current);
+  return lines;
 }
 
 export function wrapBlock(text: string, width: number, indent = ""): string[] {

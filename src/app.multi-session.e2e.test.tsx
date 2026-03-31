@@ -87,11 +87,11 @@ describe.sequential("multi-session Ink e2e", () => {
 
     try {
       await waitForFrame(app.lastFrame, (frame) =>
-        ["pulse", "orbit", "atlas", "relay"].every((label) => frame.includes(label)) &&
-        frame.includes("Prompt:"),
+        frame.includes("pulse") &&
+        frame.includes("Command Deck") &&
+        frame.includes("Roscoe draft to the Guild"),
       );
       expect(app.lastFrame()).toContain("[AUTO]");
-      expect(app.lastFrame()).toContain("claude-opus-4-6");
 
       await retryError(app, "orbit", "Transient sidecar timeout");
       await manualInput(
@@ -241,64 +241,64 @@ function buildScenario(projects: Record<string, ProjectSpec>): MockCall[] {
       "- Need keyboard movement, offline queue, and PWA verification.",
     ], 20),
     summaryCall(pulse, "Pulse Kanban scaffold is up.", "Bootstrapped kanban shell"),
-    suggestionCall(pulse, "Need keyboard movement, offline queue, and PWA verification.", "Wire keyboard moves, hard-refresh persistence, and the offline queue before visual polish.", 94, "clear implementation path"),
+    responderSeedSuggestionCall(pulse, "Need keyboard movement, offline queue, and PWA verification.", "Wire keyboard moves, hard-refresh persistence, and the offline queue before visual polish.", 94, "clear implementation path"),
     followUpWorkerCall(pulse, "Wire keyboard moves, hard-refresh persistence, and the offline queue before visual polish.", [
       "Pulse Kanban now moves cards with drag and keyboard.",
       "- Board state persists after hard refresh.",
       "- Need collaborative filters and share modal stability.",
     ], 20),
-    suggestionCall(pulse, "Need collaborative filters and share modal stability.", "Finish collaborative filters and stabilize the share modal before touching aesthetics.", 91, "the blockers are explicit"),
+    responderResumeSuggestionCall(pulse, "Need collaborative filters and share modal stability.", "Finish collaborative filters and stabilize the share modal before touching aesthetics.", 91, "the blockers are explicit"),
     followUpWorkerCall(pulse, "Finish collaborative filters and stabilize the share modal before touching aesthetics.", [
       "Pulse Kanban collaborative filters partially work.",
       "- Share modal opens, but invite tokens are not synced with filter state.",
       "- Need a decision on whether to finish filters or polish sharing first.",
     ], 25),
-    suggestionCall(pulse, "Need a decision on whether to finish filters or polish sharing first.", "Finish collaborative filters before polishing the share modal.", 63, "both paths are viable but filters unblock more"),
+    responderResumeSuggestionCall(pulse, "Need a decision on whether to finish filters or polish sharing first.", "Finish collaborative filters before polishing the share modal.", 63, "both paths are viable but filters unblock more"),
     followUpWorkerCall(pulse, "Finish collaborative filters before polishing the share modal.", [
       "Pulse Kanban collaboration flow is solid.",
       "- Invite tokens sync with filters.",
       "- Offline queue still drops one mutation after reconnect.",
     ], 25),
-    suggestionCall(pulse, "Offline queue still drops one mutation after reconnect.", "Close the reconnect bug in the offline queue and verify the installable PWA path.", 88, "the last functional gap is isolated"),
+    responderResumeSuggestionCall(pulse, "Offline queue still drops one mutation after reconnect.", "Close the reconnect bug in the offline queue and verify the installable PWA path.", 88, "the last functional gap is isolated"),
     followUpWorkerCall(pulse, "Close the reconnect bug in the offline queue and verify the installable PWA path.", [
       "Pulse Kanban is working.",
       "- Drag and keyboard moves persist.",
       "- Offline queue flushes cleanly after reconnect.",
       "- PWA install path and regression tests pass.",
     ], 30),
-    suggestionCall(pulse, "Pulse Kanban is working.", "Ask for a final demo checklist and release-note pass.", 52, "implementation is done; only handoff work remains"),
+    responderResumeSuggestionCall(pulse, "Pulse Kanban is working.", "Ask for a final demo checklist and release-note pass.", 52, "implementation is done; only handoff work remains"),
 
     initialWorkerCall(orbit, [
       "Orbit Metrics shell renders KPI cards and chart regions.",
       "- CSV export, role gating, and anomaly drill-down are still empty.",
     ], 10),
     summaryCall(orbit, "Orbit Metrics shell renders KPI cards and chart regions.", "Scaffolded metrics dashboard"),
-    errorSuggestionCall(orbit, "CSV export, role gating, and anomaly drill-down are still empty.", "Transient sidecar timeout"),
-    suggestionCall(orbit, "CSV export, role gating, and anomaly drill-down are still empty.", "Prioritize CSV export, role gating, and anomaly drill-down before cosmetic polish.", 82, "core operator functionality is missing"),
+    responderSeedErrorCall(orbit, "CSV export, role gating, and anomaly drill-down are still empty.", "Transient sidecar timeout"),
+    responderSeedSuggestionCall(orbit, "CSV export, role gating, and anomaly drill-down are still empty.", "Prioritize CSV export, role gating, and anomaly drill-down before cosmetic polish.", 82, "core operator functionality is missing"),
     followUpWorkerCall(orbit, "Prioritize CSV export, role gating, and anomaly drill-down before cosmetic polish.", [
       "Orbit Metrics export pipeline writes files, but admin and manager role gating is wrong on saved views.",
       "- Anomaly drill-down still skips filtered rows.",
     ], 35),
-    suggestionCall(orbit, "Anomaly drill-down still skips filtered rows.", "Tighten role filters, then revisit anomaly drill-down.", 58, "the sequence depends on product priority"),
+    responderResumeSuggestionCall(orbit, "Anomaly drill-down still skips filtered rows.", "Tighten role filters, then revisit anomaly drill-down.", 58, "the sequence depends on product priority"),
     followUpWorkerCall(orbit, "Lock down role filters for admin and manager saved views, then finish anomaly drill-down and export parity.", [
       "Orbit Metrics role gating now matches admin and manager scopes.",
       "- Anomaly drill-down resolves filtered rows.",
       "- Need export parity from filtered views and production refresh banners.",
     ], 40),
-    suggestionCall(orbit, "Need export parity from filtered views and production refresh banners.", "Finish filtered export parity, empty states, and refresh banners before the production pass.", 86, "the remaining work is implementation detail"),
+    responderResumeSuggestionCall(orbit, "Need export parity from filtered views and production refresh banners.", "Finish filtered export parity, empty states, and refresh banners before the production pass.", 86, "the remaining work is implementation detail"),
     followUpWorkerCall(orbit, "Finish filtered export parity, empty states, and refresh banners before the production pass.", [
       "Orbit Metrics filtered exports now match the visible table and charts.",
       "- Refresh banners and virtualization are in place.",
       "- Need a production sanity pass on query caching.",
     ], 45),
-    suggestionCall(orbit, "Need a production sanity pass on query caching.", "Run a production sanity pass on query caching and stale refresh banners.", 66, "it is the right next step but still review-worthy"),
+    responderResumeSuggestionCall(orbit, "Need a production sanity pass on query caching.", "Run a production sanity pass on query caching and stale refresh banners.", 66, "it is the right next step but still review-worthy"),
     followUpWorkerCall(orbit, "Run a production sanity pass on query caching and stale refresh banners.", [
       "Orbit Metrics is working.",
       "- Role-based filters gate correctly.",
       "- Anomaly drill-down and filtered CSV export match.",
       "- Query caching and refresh banners behave in production mode.",
     ], 45),
-    suggestionCall(orbit, "Orbit Metrics is working.", "Ask for release notes and an operator handoff checklist.", 51, "the product is done; only packaging remains"),
+    responderResumeSuggestionCall(orbit, "Orbit Metrics is working.", "Ask for release notes and an operator handoff checklist.", 51, "the product is done; only packaging remains"),
 
     initialWorkerCall(atlas, [
       "Atlas Wiki shell loads markdown notes and a basic editor.",
@@ -306,65 +306,65 @@ function buildScenario(projects: Record<string, ProjectSpec>): MockCall[] {
       "- Need version history and rename-safe graph updates.",
     ], 30),
     summaryCall(atlas, "Atlas Wiki shell loads markdown notes and a basic editor.", "Started markdown wiki shell"),
-    suggestionCall(atlas, "Need version history and rename-safe graph updates.", "Complete backlinks, search indexing, and optimistic saves before debating history polish.", 93, "the missing features are well-scoped"),
+    responderSeedSuggestionCall(atlas, "Need version history and rename-safe graph updates.", "Complete backlinks, search indexing, and optimistic saves before debating history polish.", 93, "the missing features are well-scoped"),
     followUpWorkerCall(atlas, "Complete backlinks, search indexing, and optimistic saves before debating history polish.", [
       "Atlas Wiki backlinks and full-text search are now live.",
       "- Version history is still linear and restore previews are missing.",
       "- Need a decision on history semantics before shipping.",
     ], 35),
-    suggestionCall(atlas, "Need a decision on history semantics before shipping.", "Decide whether history should stay linear or become branch-aware before shipping.", 54, "this is a product call, not just an implementation task"),
+    responderResumeSuggestionCall(atlas, "Need a decision on history semantics before shipping.", "Decide whether history should stay linear or become branch-aware before shipping.", 54, "this is a product call, not just an implementation task"),
     followUpWorkerCall(atlas, "Implement branch-aware version history with restore previews and keep backlink updates rename-safe.", [
       "Atlas Wiki now has branch-aware version history with restore previews.",
       "- Rename-safe backlink updates survive restores.",
       "- Need share links, command palette, and import/export polish.",
     ], 40),
-    suggestionCall(atlas, "Need share links, command palette, and import/export polish.", "Add share links, a command palette, and rename/restore smoke tests.", 84, "the finish line is clear"),
+    responderResumeSuggestionCall(atlas, "Need share links, command palette, and import/export polish.", "Add share links, a command palette, and rename/restore smoke tests.", 84, "the finish line is clear"),
     followUpWorkerCall(atlas, "Add share links, a command palette, and rename/restore smoke tests.", [
       "Atlas Wiki share links and command palette are finished.",
       "- Import/export works for small vaults.",
       "- Need a large-vault indexing pass before release.",
     ], 45),
-    suggestionCall(atlas, "Need a large-vault indexing pass before release.", "Finish import/export and verify large-vault indexing before release.", 77, "the remaining risk is performance validation"),
+    responderResumeSuggestionCall(atlas, "Need a large-vault indexing pass before release.", "Finish import/export and verify large-vault indexing before release.", 77, "the remaining risk is performance validation"),
     followUpWorkerCall(atlas, "Finish import/export and verify large-vault indexing before release.", [
       "Atlas Wiki is working.",
       "- Search is instant on large vaults.",
       "- Backlinks survive renames and restores.",
       "- Branch-aware history, share links, and import/export pass smoke tests.",
     ], 45),
-    suggestionCall(atlas, "Atlas Wiki is working.", "Ask whether to add onboarding docs for power users.", 49, "feature work is done; only enablement remains"),
+    responderResumeSuggestionCall(atlas, "Atlas Wiki is working.", "Ask whether to add onboarding docs for power users.", 49, "feature work is done; only enablement remains"),
 
     initialWorkerCall(relay, [
       "Relay Playground opens schemas and renders simple endpoints.",
       "- OAuth device flow, request collections, and auth inheritance are still missing.",
     ], 40),
     summaryCall(relay, "Relay Playground opens schemas and renders simple endpoints.", "Opened API playground shell"),
-    suggestionCall(relay, "OAuth device flow, request collections, and auth inheritance are still missing.", "Finish OAuth device flow, request collections, and auth inheritance before tuning the surface.", 95, "the implementation sequence is obvious"),
+    responderSeedSuggestionCall(relay, "OAuth device flow, request collections, and auth inheritance are still missing.", "Finish OAuth device flow, request collections, and auth inheritance before tuning the surface.", 95, "the implementation sequence is obvious"),
     followUpWorkerCall(relay, "Finish OAuth device flow, request collections, and auth inheritance before tuning the surface.", [
       "Relay Playground completes the OAuth device flow.",
       "- Request collections run, but inherited auth and timeout controls are incomplete.",
       "- Schema examples still miss auth-aware samples.",
     ], 50),
-    suggestionCall(relay, "Schema examples still miss auth-aware samples.", "Complete collection replay, auth inheritance, timeout controls, and auth-aware schema examples.", 79, "the missing pieces are connected"),
+    responderResumeSuggestionCall(relay, "Schema examples still miss auth-aware samples.", "Complete collection replay, auth inheritance, timeout controls, and auth-aware schema examples.", 79, "the missing pieces are connected"),
     followUpWorkerCall(relay, "Complete collection replay, auth inheritance, timeout controls, and auth-aware schema examples.", [
       "Relay Playground collections now inherit auth correctly.",
       "- Timeout controls work.",
       "- The error panel still overreacts to schema resolver warnings.",
     ], 55),
-    errorSuggestionCall(relay, "The error panel still overreacts to schema resolver warnings.", "Mock schema resolver crashed"),
-    suggestionCall(relay, "The error panel still overreacts to schema resolver warnings.", "Stabilize timeout controls, calm the warning panel, and verify auth-aware schema examples.", 78, "the remaining work is corrective"),
+    responderResumeErrorCall(relay, "The error panel still overreacts to schema resolver warnings.", "Mock schema resolver crashed"),
+    responderResumeSuggestionCall(relay, "The error panel still overreacts to schema resolver warnings.", "Stabilize timeout controls, calm the warning panel, and verify auth-aware schema examples.", 78, "the remaining work is corrective"),
     followUpWorkerCall(relay, "Stabilize timeout controls, calm the warning panel, and verify auth-aware schema examples.", [
       "Relay Playground now calms schema warnings and renders auth-aware examples.",
       "- Secrets masking in the environment editor is still missing.",
       "- Need confirmation that collection replays preserve variables.",
     ], 60),
-    suggestionCall(relay, "Need confirmation that collection replays preserve variables.", "Add secrets masking and confirm collection replays preserve variables.", 62, "this is the last functional safety pass"),
+    responderResumeSuggestionCall(relay, "Need confirmation that collection replays preserve variables.", "Add secrets masking and confirm collection replays preserve variables.", 62, "this is the last functional safety pass"),
     followUpWorkerCall(relay, "Add secrets masking and confirm collection replays preserve variables.", [
       "Relay Playground is working.",
       "- OAuth device flow completes.",
       "- Collections replay with inherited auth and preserved variables.",
       "- Schema examples render and secrets stay masked.",
     ], 60),
-    suggestionCall(relay, "Relay Playground is working.", "Ask for a launch checklist and docs review.", 50, "the application is complete"),
+    responderResumeSuggestionCall(relay, "Relay Playground is working.", "Ask for a launch checklist and docs review.", 50, "the application is complete"),
   ];
 }
 
@@ -409,7 +409,11 @@ function followUpWorkerCall(
   };
 }
 
-function suggestionCall(
+function responderSessionId(project: ProjectSpec): string {
+  return `${project.label}-roscoe`;
+}
+
+function responderSeedSuggestionCall(
   project: ProjectSpec,
   workerSignature: string,
   message: string,
@@ -419,16 +423,44 @@ function suggestionCall(
   return {
     provider: project.provider,
     promptIncludesAll: [
+      "This is the persistent hidden Roscoe responder thread",
       "Respond in this EXACT JSON format",
       workerSignature,
     ],
+    promptExcludesAll: [
+      "=== Incremental Lane Delta ===",
+    ],
+    sessionId: responderSessionId(project),
     text: JSON.stringify({ message, confidence, reasoning }),
     delayMs: 10,
     chunkDelayMs: 5,
   };
 }
 
-function errorSuggestionCall(
+function responderResumeSuggestionCall(
+  project: ProjectSpec,
+  workerSignature: string,
+  message: string,
+  confidence: number,
+  reasoning: string,
+): MockCall {
+  return {
+    provider: project.provider,
+    promptIncludesAll: [
+      "Continue as Roscoe for this same Guild lane.",
+      "=== Incremental Lane Delta ===",
+      "Respond in this EXACT JSON format",
+      workerSignature,
+    ],
+    resumeId: responderSessionId(project),
+    sessionId: responderSessionId(project),
+    text: JSON.stringify({ message, confidence, reasoning }),
+    delayMs: 10,
+    chunkDelayMs: 5,
+  };
+}
+
+function responderSeedErrorCall(
   project: ProjectSpec,
   workerSignature: string,
   stderr: string,
@@ -436,9 +468,33 @@ function errorSuggestionCall(
   return {
     provider: project.provider,
     promptIncludesAll: [
+      "This is the persistent hidden Roscoe responder thread",
       "Respond in this EXACT JSON format",
       workerSignature,
     ],
+    promptExcludesAll: [
+      "=== Incremental Lane Delta ===",
+    ],
+    stderr,
+    exitCode: 1,
+    delayMs: 10,
+  };
+}
+
+function responderResumeErrorCall(
+  project: ProjectSpec,
+  workerSignature: string,
+  stderr: string,
+): MockCall {
+  return {
+    provider: project.provider,
+    promptIncludesAll: [
+      "Continue as Roscoe for this same Guild lane.",
+      "=== Incremental Lane Delta ===",
+      "Respond in this EXACT JSON format",
+      workerSignature,
+    ],
+    resumeId: responderSessionId(project),
     stderr,
     exitCode: 1,
     delayMs: 10,
@@ -512,6 +568,7 @@ async function manualInput(
     isSessionActive(frame, label) &&
       (frame.includes("manual-input") || frame.includes("Manual override")),
   );
+  await delay(100);
   await typeText(app, manualText);
   await delay(75);
   app.stdin.write("\r");
@@ -542,8 +599,11 @@ async function waitForReadySuggestion(
       continue;
     }
     const normalized = normalizeFrame(frame);
-    const hasReadyState = frame.includes("ready │") || frame.includes(" ready ");
-    if (hasReadyState && normalized.includes(normalizeFrame(expectedText))) {
+    const hasDraftState =
+      frame.includes("ready │")
+      || frame.includes(" ready ")
+      || frame.includes("needs review");
+    if (hasDraftState && normalized.includes(normalizeFrame(expectedText))) {
       return;
     }
     await delay(25);
@@ -594,7 +654,11 @@ async function focusSession(app: ReturnType<typeof render>, label: string): Prom
 
 function isSessionActive(frame: string | undefined, label: string): boolean {
   if (!frame) return false;
-  if (normalizeFrame(frame).includes(normalizeFrame(`Session Transcript — ${label}:main`))) {
+  const normalized = normalizeFrame(frame);
+  if (normalized.includes(normalizeFrame(`Session Transcript — ${label}:main`))) {
+    return true;
+  }
+  if (normalized.includes(normalizeFrame(`${label}:main`))) {
     return true;
   }
   return new RegExp(`▸\\s+\\d+\\s+[^\\n]*\\b${escapeRegExp(label)}\\b`, "i").test(frame);
