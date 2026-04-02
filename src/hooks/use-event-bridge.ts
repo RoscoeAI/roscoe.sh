@@ -4,6 +4,7 @@ import { SessionManagerService } from "../services/session-manager.js";
 import { loadProjectContext, loadRoscoeSettings, ProjectContext } from "../config.js";
 import { LLMProtocol } from "../llm-runtime.js";
 import {
+  getExecutionModeLabel,
   getResponderProvider,
   getVerificationCadence,
   getLockedProjectProvider,
@@ -19,15 +20,82 @@ import {
   isPauseAcknowledgementText,
 } from "../session-transcript.js";
 import { buildReadyPreviewState, getPreviewState } from "../session-preview.js";
+import type { HostAction } from "../response-generator.js";
+import { inferRoscoeDecision } from "../roscoe-draft.js";
 
 const RESUME_ACTIVITY_NAME = "resume";
 const RESUME_PENDING_DETAIL = "Resuming interrupted Guild turn...";
 const RESUME_STILL_WAITING_DETAIL = "Still waiting on resumed worker...";
 const RESUME_RESPONDING_DETAIL = "Resumed worker is responding...";
 const RESUME_WATCHDOG_MS = 15_000;
+const WAITING_LANE_RECHECK_MS = 15_000;
+const MAX_OUTPUT_BUFFER_CHARS = 200_000;
+const MAX_OUTPUT_BUFFER_LINES = 600;
+const MAX_TURN_TEXT_CHARS = 120_000;
+const MAX_THINKING_TEXT_CHARS = 24_000;
+const TRUNCATION_NOTICE = "\n[Roscoe truncated older buffered output to keep memory stable.]";
+const COMPACT_PROMPT_TEXT_CHARS = 180;
+
+function clipPromptText(text: string, maxChars = COMPACT_PROMPT_TEXT_CHARS): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function summarizePromptValues(values: string[], limit: number, maxChars = COMPACT_PROMPT_TEXT_CHARS): string {
+  const cleaned = values
+    .map((value) => clipPromptText(value, maxChars))
+    .filter((value) => value.length > 0);
+  if (cleaned.length === 0) return "";
+  const head = cleaned.slice(0, limit).join("; ");
+  const remaining = cleaned.length - limit;
+  return remaining > 0 ? `${head}; +${remaining} more` : head;
+}
 
 function hasPendingLocalSuggestion(session: SessionState): boolean {
   return session.timeline.some((entry) => entry.kind === "local-suggestion" && entry.state === "pending");
+}
+
+function getLastLocalSuggestion(session: SessionState): Extract<SessionState["timeline"][number], { kind: "local-suggestion" }> | null {
+  for (let index = session.timeline.length - 1; index >= 0; index -= 1) {
+    const entry = session.timeline[index];
+    if (entry.kind === "local-suggestion") {
+      return entry;
+    }
+  }
+  return null;
+}
+
+function hasOpenAcceptanceLedgerWork(context: ProjectContext | null): boolean {
+  return Boolean(context?.intentBrief?.acceptanceLedger?.some((item) => item.status !== "proven"));
+}
+
+function shouldAutonomouslyResumeWaitingLane(
+  session: SessionState,
+  projectContext: ProjectContext | null,
+): boolean {
+  if (session.status !== "waiting") return false;
+  if (session.suggestion.kind !== "idle") return false;
+  if (session.managed._paused) return false;
+  if (session.currentToolUse) return false;
+  if (getPreviewState(session.preview).mode !== "off") return false;
+  if (hasPendingLocalSuggestion(session)) return false;
+  if (inferTerminalParkedState(session.timeline, session.summary)) return false;
+  if (!hasOpenAcceptanceLedgerWork(projectContext)) return false;
+
+  const lastSuggestion = getLastLocalSuggestion(session);
+  if (!lastSuggestion || lastSuggestion.state !== "dismissed") return false;
+  if (inferRoscoeDecision({ message: lastSuggestion.text, reasoning: lastSuggestion.reasoning }) !== "noop") return false;
+
+  return Boolean(session.managed.tracker.getContextForGeneration().trim());
+}
+
+function resetResponderForAutonomousRecheck(managed: ManagedSession): void {
+  managed.responderMonitor.restoreSessionId(null);
+  managed.responderHistoryCursor = 0;
+  managed.lastResponderPrompt = null;
+  managed.lastResponderCommand = null;
+  managed.lastResponderRationale = "Roscoe cleared a stale no-op responder thread and is reseeding it from the current lane state.";
 }
 
 export function shouldQueueSuggestionForSession(session: SessionState): boolean {
@@ -87,6 +155,7 @@ export function getWorkerExitRecoveryDecision(
 /** Build an initial prompt for auto-starting a session */
 export function buildInitialPrompt(managed: ManagedSession, context: ProjectContext | null): string {
   const parts = [`You are a Guild coding agent working on the "${managed.projectName}" project.`];
+  const compactMode = Boolean(context && getTokenEfficiencyMode(context) === "save-tokens");
 
   const lockedProvider = getLockedProjectProvider(context);
   if (lockedProvider) {
@@ -97,6 +166,12 @@ export function buildInitialPrompt(managed: ManagedSession, context: ProjectCont
     parts.push(`Roscoe is responding from the ${responderProvider} provider while you execute on ${lockedProvider}.`);
   }
   parts.push(`Runtime tuning mode: ${getRuntimeTuningMode(managed.profile.runtime)}.`);
+  parts.push(
+    getExecutionModeLabel(managed.profile.runtime) === "accelerated"
+      ? "Access mode: accelerated filesystem + network access is enabled for this lane."
+      : "Access mode: safe sandboxed execution is enabled for this lane.",
+  );
+  parts.push("Keep check-ins terse: prefer concrete execution, short status updates, and no large JSON or long proof recaps unless Roscoe explicitly asks.");
   if (context) {
     const governanceMode = getWorkerGovernanceMode(context);
     if (governanceMode === "roscoe-arbiter") {
@@ -109,22 +184,22 @@ export function buildInitialPrompt(managed: ManagedSession, context: ProjectCont
 
   if (context) {
     if (context.techStack?.length) {
-      parts.push(`Tech stack: ${context.techStack.join(", ")}.`);
+      parts.push(`Tech stack: ${compactMode ? summarizePromptValues(context.techStack, 4, 60) : context.techStack.join(", ")}.`);
     }
     if (context.goals?.length) {
-      parts.push(`Project goals: ${context.goals.join("; ")}.`);
+      parts.push(`Project goals: ${compactMode ? summarizePromptValues(context.goals, 3, 120) : context.goals.join("; ")}.`);
     }
     if (context.notes) {
-      parts.push(context.notes);
+      parts.push(compactMode ? clipPromptText(context.notes) : context.notes);
     }
     if (context.intentBrief?.projectStory) {
-      parts.push(`Project story: ${context.intentBrief.projectStory}.`);
+      parts.push(`Project story: ${compactMode ? clipPromptText(context.intentBrief.projectStory) : context.intentBrief.projectStory}.`);
     }
     if (context.intentBrief?.definitionOfDone?.length) {
-      parts.push(`Definition of done: ${context.intentBrief.definitionOfDone.join("; ")}.`);
+      parts.push(`Definition of done: ${compactMode ? summarizePromptValues(context.intentBrief.definitionOfDone, 3, 120) : context.intentBrief.definitionOfDone.join("; ")}.`);
     }
     if (context.intentBrief?.acceptanceChecks?.length) {
-      parts.push(`Acceptance checks: ${context.intentBrief.acceptanceChecks.join("; ")}.`);
+      parts.push(`Acceptance checks: ${compactMode ? summarizePromptValues(context.intentBrief.acceptanceChecks, 3, 120) : context.intentBrief.acceptanceChecks.join("; ")}.`);
     }
     if (context.intentBrief?.entrySurfaceContract?.summary) {
       parts.push(`Entry surface contract: ${context.intentBrief.entrySurfaceContract.summary}.`);
@@ -157,78 +232,86 @@ export function buildInitialPrompt(managed: ManagedSession, context: ProjectCont
       if (context.intentBrief.acceptanceLedgerMode === "inferred") {
         parts.push("Acceptance ledger is inferred from an older brief; unresolved items are advisory until refined or proven.");
       }
-      parts.push(`Acceptance ledger: ${context.intentBrief.acceptanceLedger.map((item) => `${item.label} [${item.status}]`).join("; ")}.`);
+      const ledgerItems = compactMode
+        ? context.intentBrief.acceptanceLedger
+          .filter((item) => item.status !== "proven")
+          .map((item) => `${clipPromptText(item.label, 120)} [${item.status}]`)
+        : context.intentBrief.acceptanceLedger.map((item) => `${item.label} [${item.status}]`);
+      parts.push(`Acceptance ledger: ${compactMode ? summarizePromptValues(ledgerItems, 5, 140) : ledgerItems.join("; ")}.`);
     }
-    if (context.intentBrief?.deliveryPillars?.frontend?.length) {
+    if (!compactMode && context.intentBrief?.deliveryPillars?.frontend?.length) {
       parts.push(`Frontend pillar: ${context.intentBrief.deliveryPillars.frontend.join("; ")}.`);
     }
-    if (context.intentBrief?.deliveryPillars?.backend?.length) {
+    if (!compactMode && context.intentBrief?.deliveryPillars?.backend?.length) {
       parts.push(`Backend pillar: ${context.intentBrief.deliveryPillars.backend.join("; ")}.`);
     }
-    if (context.intentBrief?.deliveryPillars?.unitComponentTests?.length) {
+    if (!compactMode && context.intentBrief?.deliveryPillars?.unitComponentTests?.length) {
       parts.push(`Unit/component test pillar: ${context.intentBrief.deliveryPillars.unitComponentTests.join("; ")}.`);
     }
-    if (context.intentBrief?.deliveryPillars?.e2eTests?.length) {
+    if (!compactMode && context.intentBrief?.deliveryPillars?.e2eTests?.length) {
       parts.push(`E2E test pillar: ${context.intentBrief.deliveryPillars.e2eTests.join("; ")}.`);
     }
     if (context.intentBrief?.coverageMechanism?.length) {
-      parts.push(`Coverage mechanism: ${context.intentBrief.coverageMechanism.join("; ")}.`);
+      parts.push(`Coverage mechanism: ${compactMode ? summarizePromptValues(context.intentBrief.coverageMechanism, 2, 120) : context.intentBrief.coverageMechanism.join("; ")}.`);
     }
     if (context.intentBrief?.deploymentContract?.summary) {
       parts.push(`Deployment contract: ${context.intentBrief.deploymentContract.summary}.`);
     }
-    if (context.intentBrief?.deploymentContract?.platforms?.length) {
+    if (!compactMode && context.intentBrief?.deploymentContract?.platforms?.length) {
       parts.push(`Deployment platforms: ${context.intentBrief.deploymentContract.platforms.join("; ")}.`);
     }
-    if (context.intentBrief?.deploymentContract?.environments?.length) {
+    if (!compactMode && context.intentBrief?.deploymentContract?.environments?.length) {
       parts.push(`Deployment environments: ${context.intentBrief.deploymentContract.environments.join("; ")}.`);
     }
-    if (context.intentBrief?.deploymentContract?.buildSteps?.length) {
+    if (!compactMode && context.intentBrief?.deploymentContract?.buildSteps?.length) {
       parts.push(`Canonical build path: ${context.intentBrief.deploymentContract.buildSteps.join("; ")}.`);
     }
-    if (context.intentBrief?.deploymentContract?.deploySteps?.length) {
+    if (!compactMode && context.intentBrief?.deploymentContract?.deploySteps?.length) {
       parts.push(`Canonical deploy path: ${context.intentBrief.deploymentContract.deploySteps.join("; ")}.`);
     }
-    if (context.intentBrief?.deploymentContract?.previewStrategy?.length) {
+    if (!compactMode && context.intentBrief?.deploymentContract?.previewStrategy?.length) {
       parts.push(`Preview/deploy strategy: ${context.intentBrief.deploymentContract.previewStrategy.join("; ")}.`);
     }
     if (context.intentBrief?.deploymentContract?.presenceStrategy?.length) {
-      parts.push(`Hosted presence strategy: ${context.intentBrief.deploymentContract.presenceStrategy.join("; ")}.`);
+      parts.push(`Hosted presence strategy: ${compactMode ? summarizePromptValues(context.intentBrief.deploymentContract.presenceStrategy, 2, 120) : context.intentBrief.deploymentContract.presenceStrategy.join("; ")}.`);
     }
     if (context.intentBrief?.deploymentContract?.proofTargets?.length) {
-      parts.push(`Hosted proof targets: ${context.intentBrief.deploymentContract.proofTargets.join("; ")}.`);
+      parts.push(`Hosted proof targets: ${compactMode ? summarizePromptValues(context.intentBrief.deploymentContract.proofTargets, 2, 120) : context.intentBrief.deploymentContract.proofTargets.join("; ")}.`);
     }
-    if (context.intentBrief?.deploymentContract?.healthChecks?.length) {
+    if (!compactMode && context.intentBrief?.deploymentContract?.healthChecks?.length) {
       parts.push(`Deployment health checks: ${context.intentBrief.deploymentContract.healthChecks.join("; ")}.`);
     }
-    if (context.intentBrief?.deploymentContract?.rollback?.length) {
+    if (!compactMode && context.intentBrief?.deploymentContract?.rollback?.length) {
       parts.push(`Rollback path: ${context.intentBrief.deploymentContract.rollback.join("; ")}.`);
     }
-    if (context.intentBrief?.deploymentContract?.requiredSecrets?.length) {
+    if (!compactMode && context.intentBrief?.deploymentContract?.requiredSecrets?.length) {
       parts.push(`Deployment secrets expected in local env files: ${context.intentBrief.deploymentContract.requiredSecrets.join("; ")}.`);
     }
     if (context.intentBrief?.nonGoals?.length) {
-      parts.push(`Do not drift into these non-goals: ${context.intentBrief.nonGoals.join("; ")}.`);
+      parts.push(`Do not drift into these non-goals: ${compactMode ? summarizePromptValues(context.intentBrief.nonGoals, 3, 120) : context.intentBrief.nonGoals.join("; ")}.`);
     }
-    if (context.intentBrief?.architecturePrinciples?.length) {
+    if (!compactMode && context.intentBrief?.architecturePrinciples?.length) {
       parts.push(`Architecture principles: ${context.intentBrief.architecturePrinciples.join("; ")}.`);
     }
     if (context.intentBrief?.autonomyRules?.length) {
-      parts.push(`Autonomy rules: ${context.intentBrief.autonomyRules.join("; ")}.`);
+      parts.push(`Autonomy rules: ${compactMode ? summarizePromptValues(context.intentBrief.autonomyRules, 3, 120) : context.intentBrief.autonomyRules.join("; ")}.`);
     }
     if (context.intentBrief?.qualityBar?.length) {
-      parts.push(`Quality bar: ${context.intentBrief.qualityBar.join("; ")}.`);
+      parts.push(`Quality bar: ${compactMode ? summarizePromptValues(context.intentBrief.qualityBar, 3, 120) : context.intentBrief.qualityBar.join("; ")}.`);
     }
     if (context.intentBrief?.riskBoundaries?.length) {
-      parts.push(`Risk boundaries: ${context.intentBrief.riskBoundaries.join("; ")}.`);
+      parts.push(`Risk boundaries: ${compactMode ? summarizePromptValues(context.intentBrief.riskBoundaries, 3, 120) : context.intentBrief.riskBoundaries.join("; ")}.`);
     }
     if (getVerificationCadence(context) === "batched") {
       parts.push("Verification cadence: batch the heavy proof stack. Use narrow local checks while a coherent slice is in flight, and only rerun the full coverage/e2e commands after a meaningful chunk, before handoff, or when a fresh global run is needed to find the next blocker.");
     } else {
       parts.push("Verification cadence: prove each slice. Once a focused slice is ready, rerun the canonical coverage/e2e proof commands before moving on.");
     }
-    if (getTokenEfficiencyMode(context) === "save-tokens") {
-      parts.push("Token efficiency mode: Roscoe stays lighter by default, so do not assume every Roscoe reply used maximum reasoning depth. Spend the heavier reasoning budget on execution only when complexity really demands it.");
+    parts.push(compactMode
+      ? "Token efficiency mode: save tokens. Use this compact contract and do not restate it back unless the detail is required for the next concrete step."
+      : "Token efficiency mode: balanced. Use broader context when it materially improves the next move.");
+    if (context.intentBrief?.deploymentContract) {
+      parts.push("If the developer reports that the deployed environment is still broken after green CI, treat that as a contradiction. Do not close the lane yet: inspect the live rollout, recent pod/server logs, and the exact failing request or callback path before claiming the fix is real.");
     }
   }
 
@@ -297,15 +380,39 @@ function summarizeThinking(text: string): string | null {
   return normalized.length > 120 ? `${normalized.slice(0, 117)}...` : normalized;
 }
 
+function trimBufferedOutput(value: string): string {
+  if (!value) return "";
+  let next = value;
+  if (next.length > MAX_OUTPUT_BUFFER_CHARS) {
+    next = `${TRUNCATION_NOTICE}\n${next.slice(-MAX_OUTPUT_BUFFER_CHARS)}`;
+  }
+
+  const lines = next.split("\n");
+  if (lines.length > MAX_OUTPUT_BUFFER_LINES) {
+    next = [TRUNCATION_NOTICE, ...lines.slice(-MAX_OUTPUT_BUFFER_LINES)].join("\n");
+  }
+
+  return next;
+}
+
+function appendCappedChunk(current: string, chunk: string, maxChars: number): string {
+  if (!chunk) return current;
+  const combined = current + chunk;
+  if (combined.length <= maxChars) return combined;
+  return `${TRUNCATION_NOTICE}\n${combined.slice(-(maxChars - TRUNCATION_NOTICE.length - 1))}`;
+}
+
 export async function handleGeneratedSuggestion(
   dispatch: React.Dispatch<AppAction>,
   service: Pick<SessionManagerService, "executeSuggestion" | "generator" | "maybeNotifyIntervention">,
   managed: ManagedSession,
   id: string,
   result: {
+    decision?: "message" | "restart-worker" | "noop" | "host-actions-only" | "needs-review";
     text: string;
     confidence: number;
     reasoning: string;
+    hostActions?: HostAction[];
   },
   autoMode: boolean,
   options?: {
@@ -313,10 +420,41 @@ export async function handleGeneratedSuggestion(
     onHoldForPreview?: () => void;
   },
 ): Promise<void> {
+  const decision = inferRoscoeDecision(result);
+
+  if (decision === "noop") {
+    dispatch({ type: "REJECT_SUGGESTION", id });
+    dispatch({ type: "SYNC_MANAGED_SESSION", id, managed });
+    return;
+  }
+
+  if (decision === "host-actions-only") {
+    const sentText = await service.executeSuggestion(managed, result);
+    dispatch({ type: "AUTO_SENT", id, text: sentText, confidence: result.confidence });
+    dispatch({ type: "SYNC_MANAGED_SESSION", id, managed });
+
+    if (sentText.trim()) {
+      setTimeout(() => {
+        dispatch({ type: "CLEAR_AUTO_SENT", id });
+      }, 2000);
+    }
+    return;
+  }
+
   dispatch({ type: "SUGGESTION_READY", id, result });
 
   if (options?.shouldHoldForPreview?.()) {
     options.onHoldForPreview?.();
+    return;
+  }
+
+  if (decision === "needs-review") {
+    await service.maybeNotifyIntervention(managed, {
+      kind: "needs-review",
+      detail: result.text.trim()
+        ? `Roscoe drafted the next Guild message and wants review before it is sent: ${result.text}`
+        : "Roscoe is holding the next Guild turn and wants your direction before sending anything.",
+    });
     return;
   }
 
@@ -330,11 +468,11 @@ export async function handleGeneratedSuggestion(
     return;
   }
 
-  dispatch({ type: "AUTO_SENT", id, text: result.text, confidence: result.confidence });
-  await service.executeSuggestion(managed, result);
+  const sentText = await service.executeSuggestion(managed, result);
+  dispatch({ type: "AUTO_SENT", id, text: sentText, confidence: result.confidence });
   dispatch({ type: "SYNC_MANAGED_SESSION", id, managed });
 
-  if (result.text.trim()) {
+  if (sentText.trim()) {
     setTimeout(() => {
       dispatch({ type: "CLEAR_AUTO_SENT", id });
     }, 2000);
@@ -354,10 +492,18 @@ export function useEventBridge(
   const sessionsRef = useRef(sessions);
   const queueSuggestionRef = useRef(new Map<string, (seedSession: SessionState) => Promise<void>>());
   const inFlightSuggestionRef = useRef(new Set<string>());
+  const waitingRecheckTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => () => {
+    for (const timer of waitingRecheckTimersRef.current.values()) {
+      clearTimeout(timer);
+    }
+    waitingRecheckTimersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     for (const [id, session] of sessions) {
@@ -367,7 +513,8 @@ export function useEventBridge(
       const managed = session.managed;
       const { monitor, tracker } = managed;
 
-      // Simple fullText accumulator — re-derive lines on each flush
+      // Keep only a rolling slice of raw output so long-running lanes do not
+      // retain the full session transcript in memory forever.
       let fullText = "";
       let turnText = "";
       let thinkingText = "";
@@ -399,6 +546,7 @@ export function useEventBridge(
       };
 
       const flushOutput = () => {
+        fullText = trimBufferedOutput(fullText);
         const lines = fullText.split("\n")
           .filter((l) => l.trim());
         dispatch({ type: "SET_OUTPUT", id, lines });
@@ -417,8 +565,8 @@ export function useEventBridge(
           });
         }
         tracker.addOutput(chunk);
-        fullText += chunk;
-        turnText += chunk;
+        fullText = trimBufferedOutput(fullText + chunk);
+        turnText = appendCappedChunk(turnText, chunk, MAX_TURN_TEXT_CHARS);
         if (!flushTimer) {
           flushTimer = setTimeout(flushOutput, 50);
         }
@@ -433,6 +581,7 @@ export function useEventBridge(
           managed,
           createPartialDispatcher(dispatch, id),
           (usage) => dispatch({ type: "ADD_SESSION_USAGE", id, usage }),
+          () => sessionsRef.current.get(id) ?? seedSession,
         )
           .then((result) => handleGeneratedSuggestion(dispatch, service, managed, id, result, autoModeRef.current, {
             shouldHoldForPreview: () => getPreviewState((sessionsRef.current.get(id) ?? seedSession).preview).mode !== "off",
@@ -692,7 +841,7 @@ export function useEventBridge(
       };
 
       const onThinking = (chunk: string) => {
-        thinkingText += chunk;
+        thinkingText = appendCappedChunk(thinkingText, chunk, MAX_THINKING_TEXT_CHARS);
       };
 
       const onUsage = (usage: {
@@ -770,6 +919,11 @@ export function useEventBridge(
         wiredRef.current.delete(id);
         queueSuggestionRef.current.delete(id);
         inFlightSuggestionRef.current.delete(id);
+        const recheckTimer = waitingRecheckTimersRef.current.get(id);
+        if (recheckTimer) {
+          clearTimeout(recheckTimer);
+          waitingRecheckTimersRef.current.delete(id);
+        }
       }
     }
   }, [sessions, dispatch, service]);
@@ -786,6 +940,56 @@ export function useEventBridge(
         continue;
       }
       void runQueuedSuggestion(session);
+    }
+  }, [sessions, dispatch]);
+
+  useEffect(() => {
+    for (const [id, session] of sessions) {
+      const runQueuedSuggestion = queueSuggestionRef.current.get(id);
+      if (!runQueuedSuggestion) continue;
+
+      const projectContext = loadProjectContext(session.managed.projectDir);
+      const shouldRecheck = shouldAutonomouslyResumeWaitingLane(session, projectContext);
+      const existingTimer = waitingRecheckTimersRef.current.get(id);
+
+      if (!shouldRecheck) {
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          waitingRecheckTimersRef.current.delete(id);
+        }
+        continue;
+      }
+
+      if (existingTimer) {
+        continue;
+      }
+
+      const timer = setTimeout(() => {
+        waitingRecheckTimersRef.current.delete(id);
+        const latestSession = sessionsRef.current.get(id);
+        if (!latestSession) return;
+
+        const latestProjectContext = loadProjectContext(latestSession.managed.projectDir);
+        if (!shouldAutonomouslyResumeWaitingLane(latestSession, latestProjectContext)) {
+          return;
+        }
+
+        resetResponderForAutonomousRecheck(latestSession.managed);
+        dispatch({ type: "SYNC_MANAGED_SESSION", id, managed: latestSession.managed });
+        void runQueuedSuggestion(latestSession);
+      }, WAITING_LANE_RECHECK_MS);
+
+      waitingRecheckTimersRef.current.set(id, timer);
+    }
+
+    for (const [id, timer] of waitingRecheckTimersRef.current) {
+      const session = sessions.get(id);
+      const runQueuedSuggestion = queueSuggestionRef.current.get(id);
+      const projectContext = session ? loadProjectContext(session.managed.projectDir) : null;
+      if (!session || !runQueuedSuggestion || !shouldAutonomouslyResumeWaitingLane(session, projectContext)) {
+        clearTimeout(timer);
+        waitingRecheckTimersRef.current.delete(id);
+      }
     }
   }, [sessions, dispatch]);
 }

@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   saveProjectContext: vi.fn(),
   parseSessionSpec: vi.fn(),
   createWorktree: vi.fn(),
-  executeSuggestion: vi.fn(async () => {}),
+  executeSuggestion: vi.fn(async () => ""),
   generateSuggestion: vi.fn(async () => ({ text: "Generated", confidence: 88 })),
   injectText: vi.fn(),
   prepareWorkerTurn: vi.fn(),
@@ -554,6 +554,7 @@ describe("SessionView", () => {
   });
 
   it("approves a ready suggestion and syncs managed state", async () => {
+    mocks.executeSuggestion.mockResolvedValueOnce("Continue");
     const session = makeSession({
       suggestion: { kind: "ready", result: { text: "Continue", confidence: 85 } },
     });
@@ -564,7 +565,7 @@ describe("SessionView", () => {
 
     expect(mocks.executeSuggestion).toHaveBeenCalledWith(session.managed, { text: "Continue", confidence: 85 });
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: "SYNC_MANAGED_SESSION", id: "lane-1", managed: session.managed });
-    expect(mocks.dispatch).toHaveBeenCalledWith({ type: "APPROVE_SUGGESTION", id: "lane-1" });
+    expect(mocks.dispatch).toHaveBeenCalledWith({ type: "APPROVE_SUGGESTION", id: "lane-1", text: "Continue" });
   });
 
   it("ignores approval and retry when the lane is not in the matching suggestion state", async () => {
@@ -584,6 +585,7 @@ describe("SessionView", () => {
     mocks.state.autoMode = true;
     mocks.meetsThreshold.mockReturnValue(true);
     mocks.generateSuggestion.mockResolvedValue({ text: "Recovered", confidence: 92 });
+    mocks.executeSuggestion.mockResolvedValueOnce("Recovered");
     const session = makeSession({
       status: "review",
       suggestion: { kind: "error", message: "boom" },
@@ -598,7 +600,12 @@ describe("SessionView", () => {
     await delay(50);
 
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: "START_GENERATING", id: "lane-1" });
-    expect(mocks.generateSuggestion).toHaveBeenCalledWith(session.managed, mocks.partialDispatcher, expect.any(Function));
+    expect(mocks.generateSuggestion).toHaveBeenCalledWith(
+      session.managed,
+      mocks.partialDispatcher,
+      expect.any(Function),
+      expect.any(Function),
+    );
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: "SUGGESTION_READY", id: "lane-1", result: { text: "Recovered", confidence: 92 } });
     expect(mocks.executeSuggestion).toHaveBeenCalledWith(session.managed, { text: "Recovered", confidence: 92 });
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: "AUTO_SENT", id: "lane-1", text: "Recovered", confidence: 92 });
@@ -610,6 +617,7 @@ describe("SessionView", () => {
     mocks.state.autoMode = true;
     mocks.meetsThreshold.mockReturnValue(true);
     mocks.generateSuggestion.mockResolvedValue({ text: "   ", confidence: 92 });
+    mocks.executeSuggestion.mockResolvedValueOnce("   ");
     const session = makeSession({
       status: "review",
       suggestion: { kind: "error", message: "boom" },

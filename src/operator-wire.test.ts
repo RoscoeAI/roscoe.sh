@@ -9,7 +9,7 @@ import type { SessionManagerService } from "./services/session-manager.js";
 
 function createService() {
   return {
-    executeSuggestion: vi.fn(async () => {}),
+    executeSuggestion: vi.fn(async () => "sent"),
     injectText: vi.fn(),
     prepareWorkerTurn: vi.fn(),
     injectOperatorGuidance: vi.fn(),
@@ -131,7 +131,7 @@ describe("operator-wire", () => {
     });
 
     expect(service.executeSuggestion).toHaveBeenCalledWith(session.managed, suggestionResult);
-    expect(actions.some((action) => action.type === "APPROVE_SUGGESTION")).toBe(true);
+    expect(actions).toContainEqual({ type: "APPROVE_SUGGESTION", id: session.id, text: "sent" });
     expect(service.notifications.sendOperatorMessage).toHaveBeenCalledWith(
       "Approved and sent Roscoe's pending draft to AppSicle.",
     );

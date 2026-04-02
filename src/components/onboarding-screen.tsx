@@ -319,9 +319,12 @@ export function OnboardingScreen({
   const [selectedProfileName, setSelectedProfileName] = useState(initialSelectedProfileName);
   const initialResponderProvider = detectProtocol(loadProfile(initialSelectedProfileName));
   const initialGuildProvider = savedGuildProvider ?? initialResponderProvider;
+  const savedGuildRuntime = savedProjectContext?.runtimeDefaults?.workerByProtocol?.[initialGuildProvider] ?? null;
   const initialGuildRuntime = mergeRuntimeSettings(
-    getDefaultWorkerRuntime(initialGuildProvider),
-    savedProjectContext?.runtimeDefaults?.workerByProtocol?.[initialGuildProvider],
+    savedGuildRuntime?.executionMode === "safe"
+      ? getDefaultWorkerRuntime(initialGuildProvider)
+      : getAcceleratedWorkerRuntime(initialGuildProvider),
+    savedGuildRuntime,
   );
   const initialResponderRuntime = mergeRuntimeSettings(
     getDefaultOnboardingRuntime(initialResponderProvider),

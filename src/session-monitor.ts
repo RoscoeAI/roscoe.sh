@@ -243,7 +243,8 @@ export class SessionMonitor extends EventEmitter {
   private resolveCommand(command: string): string {
     if (command.startsWith("/")) return command;
     try {
-      return execFileSync("which", [command], { encoding: "utf-8" }).trim();
+      const locator = process.platform === "win32" ? "where.exe" : "which";
+      return execFileSync(locator, [command], { encoding: "utf-8" }).trim().split(/\r?\n/)[0]?.trim() || command;
     } catch {
       return command;
     }
@@ -256,6 +257,44 @@ export class SessionMonitor extends EventEmitter {
       runtime: profile.runtime ? { ...profile.runtime } : undefined,
       env: profile.env ? { ...profile.env } : undefined,
     };
+  }
+
+  private closeReadline(): void {
+    if (this.rl) {
+      this.rl.close();
+      this.rl = null;
+    }
+  }
+
+  private cleanupProcess(proc: ChildProcess): void {
+    this.closeReadline();
+    proc.removeAllListeners();
+    proc.stdout?.removeAllListeners();
+    proc.stderr?.removeAllListeners();
+    if (this.proc === proc) {
+      this.proc = null;
+    }
+  }
+
+  private replaceActiveProcess(): void {
+    const current = this.proc;
+    if (!current) return;
+    this.cleanupProcess(current);
+    this.killProcessTree(current);
+    this.activeClaudeTools.clear();
+  }
+
+  private killProcessTree(proc: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void {
+    const pid = typeof proc.pid === "number" ? proc.pid : null;
+    if (pid && process.platform !== "win32") {
+      try {
+        process.kill(-pid, signal);
+        return;
+      } catch {
+        // Fall back to the direct child below.
+      }
+    }
+    proc.kill(signal);
   }
 
   /**
@@ -276,8 +315,8 @@ export class SessionMonitor extends EventEmitter {
   }
 
   private spawnProcess(args: string[], env: NodeJS.ProcessEnv): void {
-    // Clean up any previous process's readline
-    this.rl?.close();
+    // A monitor owns at most one live subprocess at a time.
+    this.replaceActiveProcess();
     const runProfile = this.cloneProfile(this.profile);
     const runStreamState = { sawTextDelta: false, sawThinkingDelta: false };
 
@@ -287,6 +326,7 @@ export class SessionMonitor extends EventEmitter {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: env as Record<string, string>,
+      detached: process.platform !== "win32",
     });
     this.proc = proc;
 
@@ -305,11 +345,7 @@ export class SessionMonitor extends EventEmitter {
     // Capture proc reference in closure to avoid race with next spawnProcess call
     proc.on("close", (code) => {
       dbg("proc", `closed with code ${code}`);
-      rl.close();
-      if (this.proc === proc) {
-        this.proc = null;
-        this.rl = null;
-      }
+      this.cleanupProcess(proc);
       this.emit("exit", code ?? 0);
     });
   }
@@ -497,6 +533,8 @@ export class SessionMonitor extends EventEmitter {
   }
 
   kill(): void {
-    this.proc?.kill();
+    const proc = this.proc;
+    if (!proc) return;
+    this.killProcessTree(proc);
   }
 }

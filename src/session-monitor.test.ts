@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PassThrough } from "stream";
 
 const { mockSpawn, mockExecFileSync } = vi.hoisted(() => ({
@@ -30,12 +30,15 @@ function createMockProc() {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const stdin = { end: vi.fn() };
+  (stdout as any).removeAllListeners = vi.fn(stdout.removeAllListeners.bind(stdout));
+  (stderr as any).removeAllListeners = vi.fn(stderr.removeAllListeners.bind(stderr));
   const proc = {
     stdout,
     stderr,
     stdin,
     kill: vi.fn(),
     on: vi.fn(),
+    removeAllListeners: vi.fn(),
     pid: 1234,
   };
   return proc;
@@ -44,15 +47,23 @@ function createMockProc() {
 describe("SessionMonitor", () => {
   let monitor: SessionMonitor;
   let mockProc: ReturnType<typeof createMockProc>;
+  let processKillSpy: ReturnType<typeof vi.spyOn>;
+  let platformSpy: ReturnType<typeof vi.spyOn> | null = null;
 
   beforeEach(() => {
     mockProc = createMockProc();
     mockSpawn.mockReturnValue(mockProc);
+    processKillSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     monitor = new SessionMonitor("test-1", {
       name: "claude",
       command: "claude",
       args: ["--permission-mode", "auto"],
     });
+  });
+
+  afterEach(() => {
+    platformSpy?.mockRestore();
+    platformSpy = null;
   });
 
   describe("helpers", () => {
@@ -109,6 +120,23 @@ describe("SessionMonitor", () => {
       expect(mockExecFileSync).toHaveBeenCalledWith("which", ["claude"], { encoding: "utf-8" });
     });
 
+    it("uses where.exe on Windows and takes the first resolved path", () => {
+      platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+      mockExecFileSync.mockReset();
+      mockExecFileSync.mockReturnValueOnce("C:\\Users\\tim\\AppData\\Local\\Programs\\Claude\\claude.cmd\r\nC:\\fallback\\claude.cmd\r\n");
+
+      const windowsMonitor = new SessionMonitor("win", { name: "claude", command: "claude", args: [] });
+
+      expect(windowsMonitor.id).toBe("win");
+      expect(mockExecFileSync).toHaveBeenCalledWith("where.exe", ["claude"], { encoding: "utf-8" });
+      windowsMonitor.startTurn("hello");
+      expect(mockSpawn).toHaveBeenLastCalledWith(
+        "C:\\Users\\tim\\AppData\\Local\\Programs\\Claude\\claude.cmd",
+        expect.any(Array),
+        expect.any(Object),
+      );
+    });
+
     it("uses command directly if starts with /", () => {
       const m = new SessionMonitor("t", { name: "test", command: "/usr/bin/claude", args: [] });
       // Should not call which for absolute paths (it's called once for the first monitor)
@@ -137,7 +165,10 @@ describe("SessionMonitor", () => {
       expect(mockSpawn).toHaveBeenCalledWith(
         expect.any(String),
         expect.arrayContaining(["-p", "hello world", "--output-format", "stream-json"]),
-        expect.objectContaining({ stdio: ["pipe", "pipe", "pipe"] }),
+        expect.objectContaining({
+          stdio: ["pipe", "pipe", "pipe"],
+          detached: process.platform !== "win32",
+        }),
       );
     });
 
@@ -160,6 +191,27 @@ describe("SessionMonitor", () => {
         expect.arrayContaining(["--resume", "sess-abc"]),
         expect.any(Object),
       );
+    });
+
+    it("replaces any existing subprocess before starting a new turn", () => {
+      const firstProc = createMockProc();
+      const secondProc = createMockProc();
+      mockSpawn
+        .mockReturnValueOnce(firstProc)
+        .mockReturnValueOnce(secondProc);
+
+      monitor.startTurn("first");
+      monitor.startTurn("second");
+
+      expect(firstProc.removeAllListeners).toHaveBeenCalled();
+      expect((firstProc.stdout as any).removeAllListeners).toHaveBeenCalled();
+      expect((firstProc.stderr as any).removeAllListeners).toHaveBeenCalled();
+      if (process.platform === "win32") {
+        expect(firstProc.kill).toHaveBeenCalledWith("SIGTERM");
+      } else {
+        expect(processKillSpy).toHaveBeenCalledWith(-1234, "SIGTERM");
+      }
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -743,10 +795,15 @@ describe("SessionMonitor", () => {
   });
 
   describe("kill", () => {
-    it("kills the spawned process", () => {
+    it("kills the spawned process group when possible", () => {
       monitor.startTurn("test");
       monitor.kill();
-      expect(mockProc.kill).toHaveBeenCalled();
+      if (process.platform === "win32") {
+        expect(mockProc.kill).toHaveBeenCalledWith("SIGTERM");
+      } else {
+        expect(processKillSpy).toHaveBeenCalledWith(-1234, "SIGTERM");
+        expect(mockProc.kill).not.toHaveBeenCalled();
+      }
     });
 
     it("does not throw when no process is running", () => {

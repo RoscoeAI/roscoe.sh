@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
   formatRoscoeDraftDisplayText,
+  inferMalformedStructuredDecision,
+  inferRoscoeDecision,
+  isSilentNoOpReasoning,
+  LEGACY_STRUCTURED_PARSE_FALLBACK_REASONING,
+  looksLikeRoscoeStructuredDraft,
+  MALFORMED_STRUCTURED_DRAFT_REASONING,
   normalizeLegacySidecarErrorText,
   normalizeRoscoeDraftMessage,
   parseRoscoeDraftPayload,
+  shouldSuppressRestoredRoscoeSuggestion,
 } from "./roscoe-draft.js";
 
 describe("parseRoscoeDraftPayload", () => {
   it("parses a valid Roscoe JSON payload", () => {
     expect(parseRoscoeDraftPayload(
-      "{\"message\":\"Ship it\",\"confidence\":91,\"reasoning\":\"clear next step\",\"orchestratorActions\":[]}",
+      "{\"decision\":\"message\",\"message\":\"Ship it\",\"confidence\":91,\"reasoning\":\"clear next step\",\"orchestratorActions\":[]}",
     )).toMatchObject({
+      decision: "message",
       message: "Ship it",
       confidence: 91,
       reasoning: "clear next step",
@@ -39,12 +47,37 @@ describe("parseRoscoeDraftPayload", () => {
   });
 
   it("parses fenced JSON payloads and keeps only draft-like fields", () => {
-    const text = "```json\n{\"message\":\"Wrapped\",\"confidence\":77,\"browserActions\":[],\"other\":\"ignored\"}\n```";
+    const text = "```json\n{\"message\":\"Wrapped\",\"confidence\":77,\"browserActions\":[],\"hostActions\":[],\"other\":\"ignored\"}\n```";
 
     expect(parseRoscoeDraftPayload(text)).toEqual({
       message: "Wrapped",
       confidence: 77,
       browserActions: [],
+      hostActions: [],
+    });
+  });
+
+  it("parses explanatory text followed by a fenced JSON payload", () => {
+    const text = [
+      "Still no new Guild turns. Checking CI one more time.",
+      "",
+      "```json",
+      "{\"decision\":\"host-actions-only\",\"message\":\"\",\"confidence\":30,\"reasoning\":\"No new Guild activity and the existing direction is clear; sending another message would be pure noise.\",\"hostActions\":[{\"type\":\"gh\",\"args\":[\"run\",\"list\",\"--branch\",\"test\",\"--limit\",\"3\"],\"description\":\"check the latest hosted runs\"}]}",
+      "```",
+    ].join("\n");
+
+    expect(parseRoscoeDraftPayload(text)).toEqual({
+      decision: "host-actions-only",
+      message: "",
+      confidence: 30,
+      reasoning: "No new Guild activity and the existing direction is clear; sending another message would be pure noise.",
+      hostActions: [
+        {
+          type: "gh",
+          args: ["run", "list", "--branch", "test", "--limit", "3"],
+          description: "check the latest hosted runs",
+        },
+      ],
     });
   });
 
@@ -63,6 +96,54 @@ describe("parseRoscoeDraftPayload", () => {
     expect(parseRoscoeDraftPayload("{\"foo\":\"bar\"}")).toBeNull();
     expect(parseRoscoeDraftPayload("{\"message\":\"broken\"")).toBeNull();
     expect(parseRoscoeDraftPayload("plain text")).toBeNull();
+  });
+
+  it("detects malformed structured Roscoe drafts even when parsing fails", () => {
+    const text = "```json\n{\"decision\":\"noop\",\"message\":\"\",\"reasoning\":\"hold silently\"\n```";
+    expect(looksLikeRoscoeStructuredDraft(text)).toBe(true);
+    expect(inferMalformedStructuredDecision(text)).toBe("noop");
+    expect(MALFORMED_STRUCTURED_DRAFT_REASONING).toContain("suppressed the raw JSON");
+  });
+});
+
+describe("inferRoscoeDecision", () => {
+  it("prefers explicit decisions when present", () => {
+    expect(inferRoscoeDecision({ decision: "noop", message: "Ship it" })).toBe("noop");
+    expect(inferRoscoeDecision({ decision: "restart-worker", message: "Resume from NEXT.md" })).toBe("restart-worker");
+  });
+
+  it("classifies host-action-only drafts without relying on wording", () => {
+    expect(inferRoscoeDecision({
+      message: "",
+      reasoning: "whatever",
+      hostActions: [{ type: "gh" }],
+    })).toBe("host-actions-only");
+  });
+
+  it("classifies repeated silent holds as noops", () => {
+    expect(inferRoscoeDecision({
+      message: "",
+      reasoning: "Fourth consecutive no-activity delta; the NEXT.md triage direction was already sent clearly, Guild has not responded, and repeated CI polls are not producing new information — Roscoe should hold silently until a Guild turn or CI completion surfaces.",
+    })).toBe("noop");
+    expect(isSilentNoOpReasoning("No new Guild activity and the existing direction is clear; sending another message would be pure noise.")).toBe(true);
+  });
+
+  it("keeps empty non-noop drafts as needs-review", () => {
+    expect(inferRoscoeDecision({
+      message: "",
+      reasoning: "Still needs clarification.",
+    })).toBe("needs-review");
+  });
+
+  it("suppresses legacy parse-fallback placeholders on restore", () => {
+    expect(shouldSuppressRestoredRoscoeSuggestion({
+      message: "No response requested.",
+      reasoning: LEGACY_STRUCTURED_PARSE_FALLBACK_REASONING,
+    })).toBe(true);
+    expect(shouldSuppressRestoredRoscoeSuggestion({
+      message: "",
+      reasoning: MALFORMED_STRUCTURED_DRAFT_REASONING,
+    })).toBe(true);
   });
 });
 

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "events";
+import { rmSync } from "fs";
 
 class MockSessionMonitor extends EventEmitter {
   startTurn = vi.fn();
@@ -236,6 +237,7 @@ function seedCoverageAnswers(onboarder: Onboarder) {
 
 describe("Onboarder coverage", () => {
   beforeEach(() => {
+    rmSync("/tmp/test-project/.roscoe", { recursive: true, force: true });
     workspaceAssessmentState.mode = "existing";
     workspaceAssessmentState.summary = "Existing repo with established structure.";
     deploymentAssessmentState.summary = "Preserve the current deploy flow.";

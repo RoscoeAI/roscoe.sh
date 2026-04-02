@@ -3,11 +3,12 @@ import { homedir } from "os";
 import { resolve } from "path";
 import { EventEmitter } from "events";
 
-const { mockStartOneShotRun } = vi.hoisted(() => ({
+const { mockStartOneShotRun, mockExecFile } = vi.hoisted(() => ({
   mockStartOneShotRun: vi.fn(() => ({
     proc: {} as any,
     result: Promise.resolve("Test summary"),
   })),
+  mockExecFile: vi.fn(),
 }));
 
 // Create a proper mock class
@@ -49,6 +50,9 @@ vi.mock("../session-monitor.js", () => ({
   SessionMonitor: vi.fn().mockImplementation(function(id: string) {
     return new MockSessionMonitor(id);
   }),
+}));
+vi.mock("child_process", () => ({
+  execFile: (...args: unknown[]) => mockExecFile(...args),
 }));
 vi.mock("../llm-runtime.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../llm-runtime.js")>();
@@ -159,6 +163,12 @@ describe("SessionManagerService", () => {
     vi.mocked(SessionMonitor).mockImplementation(function(id: string) {
       return new MockSessionMonitor(id) as any;
     });
+    mockExecFile.mockImplementation((
+      _command: string,
+      _args: string[],
+      _options: unknown,
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => callback(null, "", ""));
     vi.mocked(startOneShotRun).mockImplementation(() => ({
       proc: {} as any,
       result: Promise.resolve("Test summary"),
@@ -307,6 +317,74 @@ describe("SessionManagerService", () => {
         managed.monitor,
         "claude-code",
       );
+    });
+  });
+
+  describe("generateSuggestion", () => {
+    it("persists cleared responder state immediately when a hidden responder thread is reset", async () => {
+      const { managed } = svc.startSession({
+        profileName: "claude-code",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj",
+        worktreeName: "main",
+        projectName: "proj",
+      });
+      managed.responderMonitor.restoreSessionId("stale-responder-session");
+      managed.responderHistoryCursor = 4;
+      vi.mocked(saveLaneSession).mockClear();
+
+      const sessionState = {
+        id: managed.id,
+        profileName: managed.profileName,
+        projectName: managed.projectName,
+        worktreeName: managed.worktreeName,
+        startedAt: "2026-03-26T00:00:00.000Z",
+        status: "generating",
+        outputLines: ["Roscoe is retrying the hidden responder thread."],
+        suggestion: { kind: "generating" as const },
+        managed,
+        summary: "Retrying responder",
+        currentToolUse: null,
+        usage: {
+          inputTokens: 12,
+          outputTokens: 3,
+          cachedInputTokens: 1,
+          cacheCreationInputTokens: 0,
+        },
+        rateLimitStatus: null,
+        timeline: [],
+        viewMode: "transcript" as const,
+        scrollOffset: 0,
+        followLive: true,
+      };
+
+      const result = {
+        text: "reseeded",
+        confidence: 86,
+        reasoning: "fresh hidden thread",
+      };
+      vi.spyOn(svc.generator, "generateSuggestion").mockImplementation(async (_context, _llmName, sessionInfo) => {
+        sessionInfo?.responderMonitor?.restoreSessionId(null);
+        if (sessionInfo) {
+          sessionInfo.responderHistoryCursor = 0;
+          sessionInfo.onResponderStateReset?.();
+        }
+        return result;
+      });
+
+      await expect(svc.generateSuggestion(
+        managed,
+        undefined,
+        undefined,
+        () => sessionState,
+      )).resolves.toEqual(result);
+
+      expect(saveLaneSession).toHaveBeenCalledWith(expect.objectContaining({
+        responderSessionId: null,
+        responderHistoryCursor: 0,
+        status: "generating",
+        summary: "Retrying responder",
+      }));
     });
   });
 
@@ -565,6 +643,53 @@ describe("SessionManagerService", () => {
       expect(managed.awaitingInput).toBe(false);
     });
 
+    it("restarts the Guild worker from a fresh turn when Roscoe issues a restart-worker decision", async () => {
+      const { managed } = svc.startSession({
+        profileName: "test",
+        projectDir: "/tmp",
+        worktreePath: "/tmp",
+        worktreeName: "main",
+        projectName: "test",
+      });
+      managed.awaitingInput = true;
+      managed.monitor.restoreSessionId("stale-session");
+
+      await svc.executeSuggestion(managed, {
+        decision: "restart-worker",
+        text: "Continue from the next still-open ledger item: NEXT.md: AI generation bug triage complete.",
+        confidence: 88,
+        reasoning: "Guild stall self-heal.",
+      });
+
+      expect(managed.monitor.restoreSessionId).toHaveBeenCalledWith(null);
+      expect(managed.monitor.startTurn).toHaveBeenCalledWith("Continue from the next still-open ledger item: NEXT.md: AI generation bug triage complete.");
+      expect(managed.monitor.sendFollowUp).not.toHaveBeenCalled();
+      expect(managed.awaitingInput).toBe(false);
+    });
+
+    it("suppresses raw structured draft JSON instead of injecting it back to the worker", async () => {
+      const { managed } = svc.startSession({
+        profileName: "test",
+        projectDir: "/tmp",
+        worktreePath: "/tmp",
+        worktreeName: "main",
+        projectName: "test",
+      });
+      managed.awaitingInput = true;
+      managed.monitor.getSessionId = vi.fn(() => "session-1");
+
+      const sentText = await svc.executeSuggestion(managed, {
+        text: "```json\n{\"decision\":\"noop\",\"message\":\"\",\"reasoning\":\"hold silently\"}\n```",
+        confidence: 20,
+        reasoning: "malformed structured draft",
+      });
+
+      expect(sentText).toBe("");
+      expect(managed.monitor.sendFollowUp).not.toHaveBeenCalled();
+      expect(managed.monitor.startTurn).not.toHaveBeenCalled();
+      expect(managed.awaitingInput).toBe(true);
+    });
+
     it("executes browser and orchestrator actions before injecting the next worker turn", async () => {
       const browserAgent = {
         screenshot: vi.fn().mockResolvedValue(undefined),
@@ -616,6 +741,292 @@ describe("SessionManagerService", () => {
       expect(orchestrator.sendReview).toHaveBeenCalledWith("worker-1", "review diff");
       expect(orchestrator.sendInput).toHaveBeenCalledWith("worker-1", "resume work");
       expect(managed.monitor.sendFollowUp).toHaveBeenCalledWith("continue");
+    });
+
+    it("runs approved host-side git actions locally and injects the real result back to the worker", async () => {
+      mockExecFile.mockImplementation((
+        _command: string,
+        args: string[],
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        if (args[0] === "add") {
+          callback(null, "", "");
+          return;
+        }
+        if (args[0] === "commit") {
+          callback(null, "[feature-roscoe abc1234] Re-enable CI gates\n 5 files changed", "");
+          return;
+        }
+        callback(null, "", "To github.com:timheckel/k12io.git\n   abc1234..def5678  HEAD -> test");
+      });
+
+      const { managed } = svc.startSession({
+        profileName: "test",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj-feature",
+        worktreeName: "feature-roscoe",
+        projectName: "proj",
+      });
+      managed.awaitingInput = true;
+      managed.monitor.getSessionId = vi.fn(() => "session-1");
+
+      const sentText = await svc.executeSuggestion(managed, {
+        text: "Those host-side git steps are done. Verify CI and close any remaining ledger gaps.",
+        confidence: 91,
+        reasoning: "The transcript already approved the exact git commands.",
+        hostActions: [
+          { type: "git", args: ["add", "packages/web/e2e/stripe-checkout-failures.test.ts"], description: "stage the approved file" },
+          { type: "git", args: ["commit", "-m", "Re-enable CI gates and harden checkout e2e"], description: "create the approved commit" },
+          { type: "git", args: ["push", "origin", "HEAD:test"], description: "push test branch" },
+        ],
+      });
+
+      expect(mockExecFile).toHaveBeenCalledTimes(3);
+      expect(mockExecFile).toHaveBeenNthCalledWith(
+        1,
+        "git",
+        ["add", "packages/web/e2e/stripe-checkout-failures.test.ts"],
+        expect.objectContaining({ cwd: "/tmp/proj-feature" }),
+        expect.any(Function),
+      );
+      expect(sentText).toContain("Roscoe ran host-side Git to cross the shared worktree/.git boundary.");
+      expect(sentText).toContain("`git commit -m Re-enable CI gates and harden checkout e2e`");
+      expect(sentText).toContain("Those host-side git steps are done.");
+      expect(managed.monitor.sendFollowUp).toHaveBeenCalledWith(sentText);
+    });
+
+    it("injects a failure summary when a host-side git action is rejected by the safety gate", async () => {
+      const { managed } = svc.startSession({
+        profileName: "test",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj-feature",
+        worktreeName: "feature-roscoe",
+        projectName: "proj",
+      });
+      managed.awaitingInput = true;
+      managed.monitor.getSessionId = vi.fn(() => "session-1");
+
+      const sentText = await svc.executeSuggestion(managed, {
+        text: "Continue from the actual host result above.",
+        confidence: 79,
+        reasoning: "The sandbox blocker was specific to git metadata.",
+        hostActions: [
+          { type: "git", args: ["push", "--force", "origin", "HEAD:test"], description: "force push the branch" },
+        ],
+      });
+
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(sentText).toContain("failed: host git action includes a disallowed flag");
+      expect(sentText).toContain("A host-side command failed.");
+      expect(managed.monitor.sendFollowUp).toHaveBeenCalledWith(sentText);
+    });
+
+    it("runs approved host-side gh run checks locally and injects the result back to the worker", async () => {
+      mockExecFile.mockImplementation((
+        command: string,
+        args: string[],
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        if (command !== "gh") {
+          callback(new Error("unexpected command"), "", "");
+          return;
+        }
+        if (args[1] === "list") {
+          callback(null, "completed\tpass\tRun Tests\tCI\tmain\tpush\t23871518136\t1m\n", "");
+          return;
+        }
+        callback(null, "{\"status\":\"completed\",\"conclusion\":\"success\",\"url\":\"https://github.com/example/run/23871518136\"}", "");
+      });
+
+      const { managed } = svc.startSession({
+        profileName: "test",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj-feature",
+        worktreeName: "feature-roscoe",
+        projectName: "proj",
+      });
+      managed.awaitingInput = true;
+      managed.monitor.getSessionId = vi.fn(() => "session-1");
+
+      const sentText = await svc.executeSuggestion(managed, {
+        text: "Hosted CI is confirmed. Keep moving on the next slice.",
+        confidence: 89,
+        reasoning: "The missing signal was the hosted run result.",
+        hostActions: [
+          { type: "gh", args: ["run", "list", "--branch", "test", "--limit", "3"], description: "list the latest hosted runs" },
+          { type: "gh", args: ["run", "view", "23871518136", "--json", "status,conclusion,url"], description: "inspect the hosted result" },
+        ],
+      });
+
+      expect(mockExecFile).toHaveBeenNthCalledWith(
+        1,
+        "gh",
+        ["run", "list", "--branch", "test", "--limit", "3"],
+        expect.objectContaining({ cwd: "/tmp/proj-feature" }),
+        expect.any(Function),
+      );
+      expect(sentText).toContain("Roscoe ran host-side GitHub CLI checks to verify hosted CI from the local machine.");
+      expect(sentText).toContain("`gh run view 23871518136 --json status,conclusion,url`: completed · success · https://github.com/example/run/23871518136");
+      expect(sentText).toContain("Hosted CI is confirmed. Keep moving on the next slice.");
+      expect(managed.monitor.sendFollowUp).toHaveBeenCalledWith(sentText);
+    });
+
+    it("runs approved host-side kubectl checks locally and injects the deployed evidence back to the worker", async () => {
+      mockExecFile.mockImplementation((
+        command: string,
+        args: string[],
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        if (command !== "kubectl") {
+          callback(new Error("unexpected command"), "", "");
+          return;
+        }
+        if (args.includes("logs")) {
+          callback(
+            null,
+            "scope=rosterstream:callback hasCode=true hasState=false Invalid RosterStream state in callback\n",
+            "",
+          );
+          return;
+        }
+        callback(null, 'deployment "k12io-test" successfully rolled out\n', "");
+      });
+
+      const { managed } = svc.startSession({
+        profileName: "test",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj-feature",
+        worktreeName: "feature-roscoe",
+        projectName: "proj",
+      });
+      managed.awaitingInput = true;
+      managed.monitor.getSessionId = vi.fn(() => "session-1");
+
+      const sentText = await svc.executeSuggestion(managed, {
+        text: "The deployed contradiction is now grounded in live cluster evidence. Continue from the real rollout/log output above.",
+        confidence: 93,
+        reasoning: "Green CI was contradicted by the live deployment; Roscoe should fetch the real rollout and log evidence.",
+        hostActions: [
+          {
+            type: "kubectl",
+            args: ["--context", "k12-test-user", "rollout", "status", "deployment/k12io-test", "-n", "default"],
+            description: "check the active test rollout",
+          },
+          {
+            type: "kubectl",
+            args: ["--context", "k12-test-user", "logs", "deployment/k12io-test", "-n", "default", "--since", "30m"],
+            description: "inspect recent deployed auth logs",
+          },
+        ],
+      });
+
+      expect(mockExecFile).toHaveBeenNthCalledWith(
+        1,
+        "kubectl",
+        ["--context", "k12-test-user", "rollout", "status", "deployment/k12io-test", "-n", "default"],
+        expect.objectContaining({ cwd: "/tmp/proj-feature" }),
+        expect.any(Function),
+      );
+      expect(sentText).toContain("Roscoe ran host-side Kubernetes debug checks against the deployed environment.");
+      expect(sentText).toContain("`kubectl --context k12-test-user logs deployment/k12io-test -n default --since 30m`");
+      expect(sentText).toContain("Invalid RosterStream state in callback");
+      expect(managed.monitor.sendFollowUp).toHaveBeenCalledWith(sentText);
+    });
+
+    it("strips stale approval wording after successful host actions", async () => {
+      mockExecFile.mockImplementation((
+        command: string,
+        _args: string[],
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        if (command === "git") {
+          callback(null, "", "");
+          return;
+        }
+        callback(null, "completed\tfailure\tOlder run\tBuild and Deploy\t test\tpush\t23874124354\t12m42s\t2026-04-01T22:33:07Z\n", "");
+      });
+
+      const { managed } = svc.startSession({
+        profileName: "test",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj-feature",
+        worktreeName: "feature-roscoe",
+        projectName: "proj",
+      });
+      managed.awaitingInput = true;
+      managed.monitor.getSessionId = vi.fn(() => "session-1");
+
+      const sentText = await svc.executeSuggestion(managed, {
+        text: "ClassLink commit is staged and ready — waiting on host-side git approval to land it. Once pushed, start OneRoster sync immediately. Don't wait for CI on ClassLink — same rationale as Clever: additive test files with gated synthetic path, low regression risk.",
+        confidence: 80,
+        reasoning: "The bridge already executed the land-and-check steps.",
+        hostActions: [
+          { type: "git", args: ["push", "origin", "HEAD:test"], description: "push the branch" },
+          { type: "gh", args: ["run", "list", "--branch", "test", "--limit", "3"], description: "check the latest hosted runs" },
+        ],
+      });
+
+      expect(sentText).toContain("Roscoe ran host-side Git and GitHub CLI steps to cross local runtime boundaries the lane could not complete natively.");
+      expect(sentText).not.toContain("waiting on host-side git approval");
+      expect(sentText).not.toContain("Once pushed");
+      expect(sentText).toContain("Start OneRoster sync immediately.");
+      expect(sentText).toContain("Don't wait for CI on ClassLink");
+    });
+
+    it("rejects disallowed host-side gh flags", async () => {
+      const { managed } = svc.startSession({
+        profileName: "test",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj-feature",
+        worktreeName: "feature-roscoe",
+        projectName: "proj",
+      });
+      managed.awaitingInput = true;
+      managed.monitor.getSessionId = vi.fn(() => "session-1");
+
+      const sentText = await svc.executeSuggestion(managed, {
+        text: "Stay grounded in the real hosted output.",
+        confidence: 77,
+        reasoning: "Roscoe should not allow arbitrary gh access here.",
+        hostActions: [
+          { type: "gh", args: ["run", "view", "23871518136", "--repo", "other/repo"], description: "inspect another repo" },
+        ],
+      });
+
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(sentText).toContain("failed: host gh action includes a disallowed flag");
+      expect(sentText).toContain("A host-side command failed.");
+      expect(managed.monitor.sendFollowUp).toHaveBeenCalledWith(sentText);
+    });
+
+    it("rejects disallowed host-side kubectl commands", async () => {
+      const { managed } = svc.startSession({
+        profileName: "test",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj-feature",
+        worktreeName: "feature-roscoe",
+        projectName: "proj",
+      });
+      managed.awaitingInput = true;
+      managed.monitor.getSessionId = vi.fn(() => "session-1");
+
+      const sentText = await svc.executeSuggestion(managed, {
+        text: "Stay grounded in the real deployed output.",
+        confidence: 78,
+        reasoning: "Roscoe should never allow mutating kubectl actions here.",
+        hostActions: [
+          { type: "kubectl", args: ["apply", "-f", "pod.yaml"], description: "mutate the cluster" },
+        ],
+      });
+
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(sentText).toContain('failed: host kubectl action "apply" is not allowed');
+      expect(sentText).toContain("A host-side command failed.");
+      expect(managed.monitor.sendFollowUp).toHaveBeenCalledWith(sentText);
     });
 
     it("skips optional browser and orchestrator actions when helpers are unavailable", async () => {
@@ -724,7 +1135,7 @@ describe("SessionManagerService", () => {
           { type: "review", workerId: "worker-1", text: "review diff" },
           { type: "input", workerId: "worker-1", text: "resume work" },
         ],
-      })).resolves.toBeUndefined();
+      })).resolves.toBe("continue");
 
       expect(managed.monitor.sendFollowUp).toHaveBeenCalledWith("continue");
     });
@@ -1288,6 +1699,75 @@ describe("SessionManagerService", () => {
       });
 
       expect(restoredState?.status).toBe("waiting");
+    });
+
+    it("restores the normalized timeline so legacy parse-fallback suggestions stay dismissed", () => {
+      vi.mocked(loadLaneSession).mockReturnValue({
+        laneKey: "lane",
+        projectDir: "/tmp/proj",
+        projectName: "proj",
+        worktreePath: "/tmp/proj",
+        worktreeName: "main",
+        profileName: "codex",
+        protocol: "codex",
+        providerSessionId: "provider-session",
+        responderProtocol: "claude",
+        responderSessionId: "responder-session",
+        trackerHistory: [],
+        responderHistoryCursor: 0,
+        timeline: [
+          {
+            id: "remote-1",
+            kind: "remote-turn",
+            timestamp: 1,
+            provider: "codex",
+            text: "Waiting on new hosted proof or a materially different update.",
+          },
+          {
+            id: "suggestion-1",
+            kind: "local-suggestion",
+            timestamp: 2,
+            text: "No response requested.",
+            confidence: 50,
+            reasoning: "Could not parse structured response — defaulting to medium confidence",
+            state: "pending",
+          },
+        ],
+        outputLines: [],
+        summary: "(summary unavailable)",
+        currentToolUse: null,
+        status: "waiting",
+        startedAt: "2026-03-26T00:00:00.000Z",
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          cacheCreationInputTokens: 0,
+        },
+        rateLimitStatus: null,
+        pendingOperatorMessages: [],
+        savedAt: "2026-03-26T00:00:00.000Z",
+      } as any);
+
+      const { restoredState } = svc.startSession({
+        profileName: "codex",
+        projectDir: "/tmp/proj",
+        worktreePath: "/tmp/proj",
+        worktreeName: "main",
+        projectName: "proj",
+      });
+
+      expect(restoredState?.timeline).toEqual([
+        expect.objectContaining({
+          kind: "remote-turn",
+          text: "Waiting on new hosted proof or a materially different update.",
+        }),
+        expect.objectContaining({
+          kind: "local-suggestion",
+          text: "No response requested.",
+          state: "dismissed",
+        }),
+      ]);
     });
 
     it("can leave exited lane metadata untouched when Roscoe auto-heal is disabled", () => {

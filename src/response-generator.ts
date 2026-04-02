@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { createInterface } from "readline";
 import { BrowserAgent } from "./browser-agent.js";
-import { InterviewAnswer, loadProfile, loadProjectContext, loadRoscoeSettings, ProjectContext } from "./config.js";
+import { InterviewAnswer, loadProfile, loadProjectContext, loadRoscoeSettings, ProjectContext, saveProjectContext } from "./config.js";
 import { dbg } from "./debug-log.js";
 import {
   buildCommandPreview,
@@ -17,6 +17,7 @@ import {
 } from "./llm-runtime.js";
 import {
   getDefaultProfileName,
+  getExecutionModeLabel,
   getLockedProjectProvider,
   getResponderProvider,
   getTokenEfficiencyMode,
@@ -26,7 +27,14 @@ import {
   getWorkerGovernanceMode,
   recommendResponderRuntime,
 } from "./runtime-defaults.js";
-import { parseRoscoeDraftPayload } from "./roscoe-draft.js";
+import {
+  inferMalformedStructuredDecision,
+  inferRoscoeDecision,
+  looksLikeRoscoeStructuredDraft,
+  MALFORMED_STRUCTURED_DRAFT_REASONING,
+  parseRoscoeDraftPayload,
+  RoscoeDecision,
+} from "./roscoe-draft.js";
 import { SessionMonitor } from "./session-monitor.js";
 import type { Message } from "./conversation-tracker.js";
 
@@ -37,16 +45,121 @@ const CLAUDE_HISTORY = join(process.env.HOME || "~", ".claude", "projects");
 const CODEX_SESSIONS = join(process.env.HOME || "~", ".codex", "sessions");
 const SIDECAR_PROMPT_PATH = join(__dirname, "..", "sidecar-prompt.md");
 const SIDECAR_TIMEOUT_MS = 300_000;
+const ACCEPTANCE_CLOSURE_PATTERN = /\b(already closed|ledger is closed|ledger items? (?:are )?(?:done|closed|complete)|acceptance ledger (?:is )?closed|all \d+ (?:acceptance )?ledger items? (?:are )?(?:done|closed|complete)|all three (?:acceptance )?ledger items? (?:are )?(?:done|closed|complete)|what is closed now|closed now|that closes|closes the .* front|shipped and validated|done and validated|no items remain open)\b/i;
+const ACCEPTANCE_PROOF_PATTERN = /\b(ci run|actions\/runs\/\d{6,}|\d{6,}|all green|fully green|hosted-green|green|0 failures|build green|mergeable|validated|pass(?:es|ed|ing)?|e2e|typecheck|lint|tests|nitro build)\b/i;
+const ACCEPTANCE_NEGATIVE_PATTERN = /\b(acceptance ledger still open|continuation guard tripped|meaningful work remains|do not park|keep the next slice focused|future lane|future thread|remaining work)\b/i;
+const STALLED_GUILD_REVIEW_PATTERN = /\b(unresponsive|manual restart|fresh prompt|stalled [a-z]+ session|stalled guild|developer intervention|pick this up in a different lane|resend (?:the )?(?:triage )?directive)\b/i;
+const DEFERENTIAL_TAIL_PATTERN = /\b(your call|if you want|want me to|would you prefer|up to you|should go to the developer|defer to the developer)\b/i;
+const EXPLICIT_APPROVAL_BOUNDARY_PATTERN = /\b(production deploy|deploy to prod|push to main|merge to main|destructive|delete data|migration|billing approval|secret rotation|approval boundary|risk boundary)\b/i;
+const DEPLOYED_CONTRADICTION_PATTERN = /\b(still broken|same error|invalid authentication state|can you read pod logs|pod logs|dig deeper|live issue remains|same failure)\b/i;
+const DEPLOYED_DEBUG_PATTERN = /\b(kubectl|pod logs|server logs|rollout status|describe|dig deeper|contradiction mode|callback params|cookies?)\b/i;
+const CLOSURE_SIGNAL_PATTERN = /\b(fully closed|lane is fully closed|lane is closed|nothing left|only remaining (?:check|thing)|parked|done|final hosted result|hold silently|waiting on the final hosted result)\b/i;
+const MAX_COMPACT_TEXT_CHARS = 220;
+const MAX_COMPACT_CONVERSATION_LINES = 80;
+const MAX_COMPACT_CONVERSATION_CHARS = 12_000;
+const MAX_COMPACT_TRANSCRIPT_LINES = 6;
 
-function formatInterviewAnswers(answers: InterviewAnswer[]): string[] {
-  if (answers.length === 0) return [];
-  return answers.slice(-8).map((answer, index) =>
-    `${index + 1}. ${answer.theme ? `[${answer.theme}] ` : ""}${answer.question} => ${answer.answer}`,
-  );
+type ProjectIntentRenderMode = "balanced" | "compact";
+
+function clipText(text: string, maxChars = MAX_COMPACT_TEXT_CHARS): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
-function appendProjectIntent(parts: string[], projectCtx: ProjectContext): void {
+function summarizeValues(values: string[], limit: number, maxChars = MAX_COMPACT_TEXT_CHARS): string {
+  const cleaned = values
+    .map((value) => clipText(value, maxChars))
+    .filter((value) => value.length > 0);
+  if (cleaned.length === 0) return "";
+  const head = cleaned.slice(0, limit).join(" | ");
+  const remaining = cleaned.length - limit;
+  return remaining > 0 ? `${head} | +${remaining} more` : head;
+}
+
+function summarizeAcceptanceLedger(
+  projectCtx: ProjectContext,
+  limit = 4,
+): { openSummary: string; provenCount: number; openCount: number } {
+  const ledger = projectCtx.intentBrief?.acceptanceLedger ?? [];
+  const openItems = ledger.filter((item) => item.status !== "proven");
+  const provenCount = ledger.length - openItems.length;
+  return {
+    openSummary: summarizeValues(openItems.map((item) => item.label), limit, 140),
+    provenCount,
+    openCount: openItems.length,
+  };
+}
+
+function formatInterviewAnswers(answers: InterviewAnswer[], options?: { limit?: number; compact?: boolean }): string[] {
+  if (answers.length === 0) return [];
+  const limit = options?.limit ?? 8;
+  const compact = options?.compact ?? false;
+  const selected = answers.slice(-limit);
+  return selected.map((answer, index) => {
+    const question = compact ? clipText(answer.question, 110) : answer.question;
+    const response = compact ? clipText(answer.answer, 160) : answer.answer;
+    return `${index + 1}. ${answer.theme ? `[${answer.theme}] ` : ""}${question} => ${response}`;
+  });
+}
+
+function appendProjectIntent(
+  parts: string[],
+  projectCtx: ProjectContext,
+  mode: ProjectIntentRenderMode = "balanced",
+): void {
   if (!projectCtx.intentBrief) return;
+  if (mode === "compact") {
+    const ledgerSummary = summarizeAcceptanceLedger(projectCtx);
+    parts.push("=== Roscoe Contract Digest ===");
+    parts.push(`Project story: ${clipText(projectCtx.intentBrief.projectStory, 180)}`);
+    if (projectCtx.intentBrief.definitionOfDone.length > 0) {
+      parts.push(`Definition of done: ${summarizeValues(projectCtx.intentBrief.definitionOfDone, 3, 140)}`);
+    }
+    if (projectCtx.intentBrief.acceptanceChecks.length > 0) {
+      parts.push(`Acceptance checks: ${summarizeValues(projectCtx.intentBrief.acceptanceChecks, 3, 140)}`);
+    }
+    if (projectCtx.intentBrief.entrySurfaceContract?.summary) {
+      parts.push(`Entry surface: ${clipText(projectCtx.intentBrief.entrySurfaceContract.summary, 160)}`);
+    }
+    if (projectCtx.intentBrief.localRunContract?.summary) {
+      parts.push(`Local run: ${clipText(projectCtx.intentBrief.localRunContract.summary, 160)}`);
+    }
+    if (ledgerSummary.openCount > 0) {
+      parts.push(`Open ledger (${ledgerSummary.openCount}, ${ledgerSummary.provenCount} proven): ${ledgerSummary.openSummary}`);
+    } else if ((projectCtx.intentBrief.acceptanceLedger?.length ?? 0) > 0) {
+      parts.push(`Acceptance ledger: all ${(projectCtx.intentBrief.acceptanceLedger ?? []).length} items currently proven.`);
+    }
+    if (projectCtx.intentBrief.coverageMechanism.length > 0) {
+      parts.push(`Coverage mechanism: ${summarizeValues(projectCtx.intentBrief.coverageMechanism, 2, 140)}`);
+    }
+    if (projectCtx.intentBrief.deploymentContract?.summary) {
+      parts.push(`Deployment: ${clipText(projectCtx.intentBrief.deploymentContract.summary, 160)}`);
+    }
+    if (projectCtx.intentBrief.nonGoals.length > 0) {
+      parts.push(`Non-goals: ${summarizeValues(projectCtx.intentBrief.nonGoals, 3, 120)}`);
+    }
+    if (projectCtx.intentBrief.autonomyRules.length > 0) {
+      parts.push(`Autonomy rules: ${summarizeValues(projectCtx.intentBrief.autonomyRules, 3, 120)}`);
+    }
+    if (projectCtx.intentBrief.qualityBar.length > 0) {
+      parts.push(`Quality bar: ${summarizeValues(projectCtx.intentBrief.qualityBar, 3, 120)}`);
+    }
+    if (projectCtx.intentBrief.riskBoundaries.length > 0) {
+      parts.push(`Risk boundaries: ${summarizeValues(projectCtx.intentBrief.riskBoundaries, 3, 120)}`);
+    }
+    parts.push(
+      loadRoscoeSettings().behavior.parkAtMilestonesForReview
+        ? "Milestone parking mode: enabled."
+        : "Milestone parking mode: disabled.",
+    );
+    if (projectCtx.interviewAnswers && projectCtx.interviewAnswers.length > 0) {
+      parts.push("Recent interview answers:");
+      parts.push(...formatInterviewAnswers(projectCtx.interviewAnswers, { limit: 3, compact: true }));
+    }
+    parts.push("");
+    return;
+  }
   parts.push("=== Roscoe Intent Brief ===");
   parts.push(`Project story: ${projectCtx.intentBrief.projectStory}`);
   if (projectCtx.intentBrief.primaryUsers.length > 0) {
@@ -193,6 +306,25 @@ function appendProjectIntent(parts: string[], projectCtx: ProjectContext): void 
   parts.push("");
 }
 
+function compactConversationContext(conversationContext: string): string {
+  const lines = conversationContext.split("\n").filter((line) => line.trim().length > 0);
+  const truncatedByLines = lines.length > MAX_COMPACT_CONVERSATION_LINES
+    ? lines.slice(-MAX_COMPACT_CONVERSATION_LINES)
+    : lines;
+  let compacted = truncatedByLines.join("\n");
+  if (compacted.length > MAX_COMPACT_CONVERSATION_CHARS) {
+    compacted = compacted.slice(compacted.length - MAX_COMPACT_CONVERSATION_CHARS);
+    const newlineIndex = compacted.indexOf("\n");
+    if (newlineIndex >= 0) {
+      compacted = compacted.slice(newlineIndex + 1);
+    }
+  }
+  if (compacted !== conversationContext.trim()) {
+    return `[Roscoe compacted older lane context for token efficiency.]\n${compacted}`;
+  }
+  return compacted;
+}
+
 export interface BrowserAction {
   type: "screenshot" | "navigate" | "login" | "interact" | "snapshot";
   params: Record<string, string>;
@@ -205,16 +337,25 @@ export interface OrchestratorAction {
   text: string;
 }
 
+export interface HostAction {
+  type: "git" | "gh" | "kubectl";
+  args: string[];
+  description: string;
+}
+
 export interface SuggestionResult {
+  decision?: RoscoeDecision;
   text: string;
   confidence: number;
   reasoning: string;
   browserActions?: BrowserAction[];
   orchestratorActions?: OrchestratorAction[];
+  hostActions?: HostAction[];
 }
 
 export interface SessionInfo {
   profile: HeadlessProfile;
+  responderProfile?: HeadlessProfile;
   profileName: string;
   projectName: string;
   projectDir: string;
@@ -223,6 +364,7 @@ export interface SessionInfo {
   responderMonitor?: SessionMonitor;
   responderHistory?: Message[];
   responderHistoryCursor?: number;
+  onResponderStateReset?: () => void;
 }
 
 export interface SuggestionTrace {
@@ -237,6 +379,27 @@ interface FakeGreenSignal {
   label: string;
   evidence?: string;
   source?: "operator-surface" | "deployment-contract" | "acceptance-ledger";
+}
+
+function normalizeComparisonText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
+}
+
+function describeRuntimeAccess(runtime: HeadlessProfile["runtime"], role: "guild" | "roscoe"): string {
+  const executionMode = getExecutionModeLabel(runtime);
+  if (role === "guild") {
+    return executionMode === "accelerated"
+      ? "Guild access: accelerated filesystem + network access is enabled for this lane."
+      : "Guild access: safe sandboxed execution is active for this lane.";
+  }
+
+  return executionMode === "accelerated"
+    ? "Roscoe access: accelerated responder runtime is enabled, but Roscoe should still stay focused on drafting and coordination."
+    : "Roscoe access: safe responder runtime is active; Roscoe drafts, coordinates, and may use tightly scoped hostActions when the transcript already justifies them.";
 }
 
 export class ResponseGenerator {
@@ -423,6 +586,40 @@ export class ResponseGenerator {
     return null;
   }
 
+  private shouldRetryStatefulResponder(
+    error: unknown,
+    session: SessionInfo,
+  ): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    const hasExistingResponderThread = Boolean(session.responderMonitor?.getSessionId());
+    if (!hasExistingResponderThread) return false;
+    return true;
+  }
+
+  private resetStatefulResponder(session: SessionInfo): void {
+    session.responderMonitor?.restoreSessionId(null);
+    session.responderHistoryCursor = 0;
+    session.onResponderStateReset?.();
+  }
+
+  private sanitizeResponderProfileForDrafting(profile: HeadlessProfile): HeadlessProfile {
+    if (detectProtocol(profile) !== "claude") {
+      return profile;
+    }
+
+    if (!profile.runtime) {
+      return profile;
+    }
+
+    const runtime = { ...profile.runtime };
+    delete runtime.permissionMode;
+    delete runtime.dangerouslySkipPermissions;
+    return {
+      ...profile,
+      runtime,
+    };
+  }
+
   async buildContext(
     conversationContext: string,
     llmName: string,
@@ -434,6 +631,7 @@ export class ResponseGenerator {
     const projectCtx = session
       ? this.loadSessionProjectContext(session)
       : this.projectContext;
+    const compactMode = projectCtx ? getTokenEfficiencyMode(projectCtx) === "save-tokens" : false;
 
     if (projectCtx) {
       parts.push("=== Project Context ===");
@@ -441,60 +639,72 @@ export class ResponseGenerator {
       if (session?.worktreeName && session.worktreeName !== "main") {
         parts.push(`Worktree: ${session.worktreeName} (${session.worktreePath})`);
       }
-      parts.push(`Goals: ${projectCtx.goals.join(", ")}`);
-      parts.push(`Milestones: ${projectCtx.milestones.join(", ")}`);
-      parts.push(`Tech: ${projectCtx.techStack.join(", ")}`);
-    if (projectCtx.notes) {
-      parts.push(`Notes: ${projectCtx.notes}`);
+      parts.push(`Goals: ${compactMode ? summarizeValues(projectCtx.goals, 3, 120) : projectCtx.goals.join(", ")}`);
+      parts.push(`Milestones: ${compactMode ? summarizeValues(projectCtx.milestones, 3, 120) : projectCtx.milestones.join(", ")}`);
+      parts.push(`Tech: ${compactMode ? summarizeValues(projectCtx.techStack, 4, 80) : projectCtx.techStack.join(", ")}`);
+      if (projectCtx.notes) {
+        parts.push(`Notes: ${compactMode ? clipText(projectCtx.notes, 180) : projectCtx.notes}`);
+      }
+      const guildProvider = getLockedProjectProvider(projectCtx);
+      const responderProvider = getResponderProvider(projectCtx);
+      if (guildProvider) {
+        parts.push(`Guild provider: ${guildProvider}`);
+      }
+      if (responderProvider) {
+        parts.push(`Roscoe provider: ${responderProvider}`);
+      }
+      if (session?.profile?.runtime) {
+        parts.push(`Runtime management mode: ${getRuntimeTuningMode(session.profile.runtime)}`);
+        parts.push(describeRuntimeAccess(session.profile.runtime, "guild"));
+      }
+      if (session?.responderProfile?.runtime) {
+        parts.push(describeRuntimeAccess(session.responderProfile.runtime, "roscoe"));
+      }
+      parts.push(
+        `Guild governance mode: ${getWorkerGovernanceMode(projectCtx) === "roscoe-arbiter"
+          ? "Roscoe arbiter (Guild should check with Roscoe before material changes)"
+          : "Guild autonomous (Guild can proceed directly inside the brief)"}`,
+      );
+      const responderApprovalMode = getResponderApprovalMode(projectCtx);
+      if (responderApprovalMode) {
+        parts.push(`Roscoe approval default: ${responderApprovalMode === "auto"
+          ? "auto-send high-confidence replies unless a boundary is crossed"
+          : "always ask the developer before Roscoe sends a reply"}`);
+      }
+      parts.push(`Verification cadence: ${getVerificationCadence(projectCtx) === "prove-each-slice"
+        ? "prove each focused slice with a fresh full proof run once it is ready"
+        : "batch the heavy proof stack and use narrow checks while a coherent slice is still in flight"}`);
+      parts.push(`Token efficiency: ${compactMode
+        ? "save tokens — compact contract digest plus recent lane delta only"
+        : "balanced — broader context when it materially helps the next move"}`);
+      parts.push("");
+      appendProjectIntent(parts, projectCtx, compactMode ? "compact" : "balanced");
     }
-    const guildProvider = getLockedProjectProvider(projectCtx);
-    const responderProvider = getResponderProvider(projectCtx);
-    if (guildProvider) {
-      parts.push(`Guild provider: ${guildProvider}`);
-    }
-    if (responderProvider) {
-      parts.push(`Roscoe provider: ${responderProvider}`);
-    }
-    if (session?.profile?.runtime) {
-      parts.push(`Runtime management mode: ${getRuntimeTuningMode(session.profile.runtime)}`);
-    }
-    parts.push(
-      `Guild governance mode: ${getWorkerGovernanceMode(projectCtx) === "roscoe-arbiter"
-        ? "Roscoe arbiter (Guild should check with Roscoe before material changes)"
-        : "Guild autonomous (Guild can proceed directly inside the brief)"}`,
-    );
-    const responderApprovalMode = getResponderApprovalMode(projectCtx);
-    if (responderApprovalMode) {
-      parts.push(`Roscoe approval default: ${responderApprovalMode === "auto"
-        ? "auto-send high-confidence replies unless a boundary is crossed"
-        : "always ask the developer before Roscoe sends a reply"}`);
-    }
-    parts.push(`Verification cadence: ${getVerificationCadence(projectCtx) === "prove-each-slice"
-      ? "prove each focused slice with a fresh full proof run once it is ready"
-      : "batch the heavy proof stack and use narrow checks while a coherent slice is still in flight"}`);
-    parts.push(`Token efficiency: ${getTokenEfficiencyMode(projectCtx) === "save-tokens"
-      ? "keep Roscoe lighter by default and spend the heavier reasoning budget on Guild execution"
-      : "balance response quality and depth without an explicit token-saving bias"}`);
-    parts.push("");
-    appendProjectIntent(parts, projectCtx);
-  }
 
     // Active conversation
     parts.push(`=== Active Guild conversation with ${llmName} ===`);
-    parts.push(conversationContext);
+    parts.push(compactMode ? compactConversationContext(conversationContext) : conversationContext);
 
     // Transcript context from the session's working directory
     const transcriptPath = session?.worktreePath || process.cwd();
     const claudeLines = this.readClaudeTranscript(transcriptPath);
     if (claudeLines.length > 0) {
       parts.push("\n=== Recent Claude Code transcript ===");
-      parts.push(claudeLines.slice(-20).join("\n"));
+      parts.push(
+        (compactMode ? claudeLines.slice(-MAX_COMPACT_TRANSCRIPT_LINES) : claudeLines.slice(-20))
+          .map((line) => compactMode ? clipText(line, 180) : line)
+          .join("\n"),
+      );
     }
 
     const codexLines = this.readCodexTranscript(transcriptPath);
     if (codexLines.length > 0) {
       parts.push("\n=== Recent Codex transcript ===");
-      parts.push(codexLines.slice(-20).join("\n"));
+      parts.push(
+        (compactMode ? codexLines.slice(-MAX_COMPACT_TRANSCRIPT_LINES) : codexLines.slice(-20))
+          .map((line) => compactMode ? clipText(line, 180) : line)
+          .join("\n"),
+      );
     }
 
     // Browser context
@@ -519,7 +729,7 @@ export class ResponseGenerator {
     }
   }
 
-  private getStructuredResponseInstructions(hasBrowser: boolean, hasOrchestrator: boolean): string {
+  private getStructuredResponseInstructions(hasBrowser: boolean, hasOrchestrator: boolean, hasHostActions: boolean): string {
     const browserInstructions = hasBrowser
       ? `\n\nYou can suggest browser actions. Include a "browserActions" array in your JSON with objects like:
   {"type": "screenshot", "params": {}, "description": "why"}
@@ -532,29 +742,63 @@ export class ResponseGenerator {
   {"type": "review", "workerId": "session-id", "text": "review instructions"}`
       : "";
 
+    const hostInstructions = hasHostActions
+      ? `\n\nYou can suggest tightly scoped host-side Git, GitHub CLI, or read-only kubectl actions when the transcript already justifies them and Roscoe needs a host bridge. Include a "hostActions" array with objects like:
+  {"type": "git", "args": ["add", "path/to/file.ts"], "description": "stage the approved file"}
+  {"type": "git", "args": ["commit", "-m", "Commit message"], "description": "create the approved commit"}
+  {"type": "git", "args": ["push", "origin", "HEAD:test"], "description": "push the approved branch"}
+  {"type": "gh", "args": ["run", "list", "--branch", "test", "--limit", "3"], "description": "check the latest hosted runs"}
+  {"type": "gh", "args": ["run", "view", "23871518136", "--json", "status,conclusion,url"], "description": "inspect the hosted CI result"}
+  {"type": "kubectl", "args": ["--context", "k12-test-user", "rollout", "status", "deployment/k12io-test", "-n", "default"], "description": "check the current test rollout"}
+  {"type": "kubectl", "args": ["--context", "k12-test-user", "logs", "deployment/k12io-test", "-n", "default", "--since", "30m"], "description": "inspect recent deployed app logs"}
+
+Host action rules:
+- Keep hostActions limited to Git, \`gh run list\` / \`gh run view\`, and read-only \`kubectl\` checks (\`config current-context\`, \`get\`, \`describe\`, \`logs\`, \`rollout status\`). Do not use shell wrappers, chaining, or arbitrary binaries.
+- Only use hostActions when the transcript already justifies the exact step and Roscoe needs a host bridge, not because you want broader elevated access.
+- Do not invent file lists, commit messages, or ref names that are not grounded in the transcript.
+- For \`gh\` hostActions, stay focused on hosted CI proof that is already named in the transcript (branch, commit, run id, job, or status check).
+- For \`kubectl\` hostActions, stay read-only and focused on explaining a live deployed contradiction: active rollout, current pod, recent logs, or resource description on the affected environment.
+- If you include hostActions, write "message" as the follow-up Roscoe should send to the Guild after those hostActions run successfully. Do not ask the user to approve or manually run the Git command again.`
+      : "";
+
     return `Respond in this EXACT JSON format (no markdown fences, just raw JSON):
 {
+  "decision": "message | restart-worker | noop | host-actions-only | needs-review",
   "message": "the suggested message to send",
   "confidence": <number 0-100>,
-  "reasoning": "one sentence explaining why"${hasBrowser ? ',\n  "browserActions": []' : ""}${hasOrchestrator ? ',\n  "orchestratorActions": []' : ""}
+  "reasoning": "one sentence explaining why"${hasBrowser ? ',\n  "browserActions": []' : ""}${hasOrchestrator ? ',\n  "orchestratorActions": []' : ""}${hasHostActions ? ',\n  "hostActions": []' : ""}
 }
+
+Decision rules:
+- "message": Roscoe should send the message to Guild normally
+- "restart-worker": Roscoe should restart the Guild turn and send this message as the fresh redirect when the current Guild lane appears stalled but the next open ledger item is still clear
+- "noop": Roscoe should hold silently and send nothing
+- "host-actions-only": Roscoe should run the listed hostActions now; keep "message" empty unless Roscoe should send a follow-up after those actions succeed
+- "needs-review": Roscoe should surface the draft for developer review instead of auto-sending
 
 Message style rules:
 - Do not reuse a stock Roscoe scaffold or boilerplate opener/closer.
 - Write the next message as a natural continuation of this exact lane's conversation.
+- Keep the message terse by default: prefer 1 short paragraph or 2-4 flat bullets, not a long memo.
+- Do not restate the full project brief, ledger, or run history when a short directive or short rationale is enough.
+- Do not paste or quote structured JSON back into the conversation.
 - If older Roscoe turns in the transcript are repetitive, do not imitate their wording.
 - Only mention project anchoring, cross-project leakage, or "wrong session" corrections if the current turn still shows a real project mix-up that affects the next move.
 - Do not mechanically tell Guild to rerun the full proof stack after every micro-change; follow the saved verification cadence and only call for heavy reruns when they materially change the next decision.
 - Do not make preview a mandatory gate; only suggest it when a live artifact would answer the next decision faster than more implementation or tests.
 - Do not treat a shell route, placeholder page, sign-in wall, tenant-not-found state, or preview-unavailable panel as "done" unless the saved brief explicitly says that state is the intended milestone. If local use still depends on seed data, auth, or external infrastructure, say so plainly and point to the next unblock.
 - If the project has a hosted web presence story, do not treat local-only proof as the whole story forever. Establish or preserve the truthful preview/stage/production path that fits the repo, and use operator-openable URLs as proof when that contract says they should exist.
+- If the developer says the deployed environment is still broken after green CI or a closure summary, treat that as a contradiction, not noise. Do not close the lane. Gather live deployed evidence first: rollout status, recent pod/server logs, relevant curl/browser repro, and the exact failing auth/callback/request path.
+- If the Guild lane is blocked by the shared worktree/.git boundary, or Roscoe only needs hosted CI proof via \`gh run\`, prefer hostActions over asking the user to run those commands manually.
+- If the Guild has gone silent through repeated no-activity deltas but the next still-open ledger item is clear, use "restart-worker" with the exact redirect Roscoe should send. Do not ask the developer whether Roscoe should resend it unless the next slice is genuinely ambiguous or crosses an approval boundary.
+- When the saved brief clearly resolves a trade-off, direct the choice plainly. Do not end with "your call", "if you want", or another deference phrase unless an explicit approval boundary is actually in play.
 - If the runtime supports native agent or sub-agent delegation, you may suggest bounded parallel subtasks when they keep the feedback loop shorter without making ownership murky.
 
 Confidence guide:
 - 90-100: Transcript, definition of done, and acceptance checks all point to the same next step with no meaningful scope risk
 - 70-89: Good alignment with intent, but there is still implementation or prioritization ambiguity
 - 50-69: Multiple plausible next steps fit the transcript, and Roscoe's intent brief does not clearly choose between them
-- Below 50: The next move would set scope, reinterpret definition of done, or claim completion without enough grounding in the intent brief${browserInstructions}${orchestratorInstructions}`;
+- Below 50: The next move would set scope, reinterpret definition of done, or claim completion without enough grounding in the intent brief${browserInstructions}${orchestratorInstructions}${hostInstructions}`;
   }
 
   private parseSuggestionOutput(raw: string): SuggestionResult {
@@ -568,18 +812,31 @@ Confidence guide:
       if (!trimmed) {
         throw new Error("Sidecar produced no output");
       }
+      if (looksLikeRoscoeStructuredDraft(trimmed)) {
+        return {
+          decision: inferMalformedStructuredDecision(trimmed),
+          text: "",
+          confidence: 20,
+          reasoning: MALFORMED_STRUCTURED_DRAFT_REASONING,
+        };
+      }
       return {
+        decision: "needs-review",
         text: trimmed,
         confidence: 50,
         reasoning: "Could not parse structured response — defaulting to medium confidence",
       };
     }
+
+    const decision = inferRoscoeDecision(parsed);
     return {
+      decision,
       text: typeof parsed.message === "string" ? parsed.message : "",
       confidence: typeof parsed.confidence === "number" ? parsed.confidence : 50,
       reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : "",
       browserActions: parsed.browserActions as BrowserAction[] | undefined,
       orchestratorActions: parsed.orchestratorActions as OrchestratorAction[] | undefined,
+      hostActions: parsed.hostActions as HostAction[] | undefined,
     };
   }
 
@@ -719,11 +976,328 @@ Confidence guide:
     return { triggered: false };
   }
 
+  private getRecentTranscriptLines(conversationContext: string): string[] {
+    return conversationContext
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .slice(-120);
+  }
+
+  private getAcceptanceMatchTerms(item: { label: string; evidence: string[] }): string[] {
+    const terms = [item.label];
+    const withoutParens = item.label.replace(/\s*\([^)]*\)/g, "").trim();
+    if (withoutParens.length > 0 && withoutParens !== item.label) {
+      terms.push(withoutParens);
+    }
+    const colonIndex = item.label.indexOf(":");
+    if (colonIndex >= 0) {
+      const suffix = item.label.slice(colonIndex + 1).trim();
+      if (suffix.length > 0) {
+        terms.push(suffix);
+      }
+    }
+    const colonSansParensIndex = withoutParens.indexOf(":");
+    if (colonSansParensIndex >= 0) {
+      const suffix = withoutParens.slice(colonSansParensIndex + 1).trim();
+      if (suffix.length > 0) {
+        terms.push(suffix);
+      }
+    }
+
+    for (const evidence of item.evidence) {
+      const cleaned = evidence.replace(/[`*]/g, "").trim();
+      if (cleaned.length >= 14) {
+        terms.push(cleaned);
+      }
+    }
+
+    return uniqueStrings(terms.map((term) => normalizeComparisonText(term)).filter((term) => term.length >= 12));
+  }
+
+  private collectAcceptanceProofLines(
+    lines: string[],
+    item: { label: string; evidence: string[] },
+  ): string[] {
+    const terms = this.getAcceptanceMatchTerms(item);
+    if (terms.length === 0) {
+      return [];
+    }
+
+    const matchIndexes = lines.flatMap((line, index) => {
+      const normalized = normalizeComparisonText(line);
+      if (ACCEPTANCE_NEGATIVE_PATTERN.test(normalized)) {
+        return [];
+      }
+      return terms.some((term) => normalized.includes(term)) ? [index] : [];
+    });
+    if (matchIndexes.length === 0) {
+      return [];
+    }
+
+    const proofIndexes = new Set<number>();
+
+    for (const index of matchIndexes) {
+      const start = Math.max(0, index - 3);
+      const end = Math.min(lines.length - 1, index + 3);
+      let windowHasProof = false;
+
+      for (let cursor = start; cursor <= end; cursor += 1) {
+        const candidate = lines[cursor]!;
+        if (ACCEPTANCE_PROOF_PATTERN.test(candidate) || ACCEPTANCE_CLOSURE_PATTERN.test(candidate)) {
+          windowHasProof = true;
+          break;
+        }
+      }
+
+      if (!windowHasProof) {
+        continue;
+      }
+
+      proofIndexes.add(index);
+      for (let cursor = start; cursor <= end; cursor += 1) {
+        const candidate = lines[cursor]!;
+        if (ACCEPTANCE_PROOF_PATTERN.test(candidate) || ACCEPTANCE_CLOSURE_PATTERN.test(candidate)) {
+          proofIndexes.add(cursor);
+        }
+      }
+    }
+
+    if (proofIndexes.size === 0) {
+      return [];
+    }
+
+    return Array.from(proofIndexes)
+      .sort((a, b) => a - b)
+      .map((index) => lines[index]!)
+      .slice(-3);
+  }
+
+  private syncAcceptanceLedgerFromTranscript(
+    conversationContext: string,
+    projectCtx: ProjectContext | null,
+    session?: SessionInfo,
+  ): ProjectContext | null {
+    if (!projectCtx?.intentBrief?.acceptanceLedger?.length) {
+      return projectCtx;
+    }
+    if (projectCtx.intentBrief.acceptanceLedgerMode === "inferred") {
+      return projectCtx;
+    }
+
+    const lines = this.getRecentTranscriptLines(conversationContext);
+    const hasClosureSignal = lines.some((line) => ACCEPTANCE_CLOSURE_PATTERN.test(line));
+    const hasProofSignal = lines.some((line) => ACCEPTANCE_PROOF_PATTERN.test(line));
+    if (!hasClosureSignal || !hasProofSignal) {
+      return projectCtx;
+    }
+
+    let changed = false;
+    const updatedLedger = projectCtx.intentBrief.acceptanceLedger.map((item) => {
+      if (item.status === "proven") {
+        return item;
+      }
+
+      const transcriptProof = this.collectAcceptanceProofLines(lines, item);
+      if (transcriptProof.length === 0) {
+        return item;
+      }
+
+      changed = true;
+      return {
+        ...item,
+        status: "proven" as const,
+        evidence: uniqueStrings([
+          ...item.evidence,
+          ...transcriptProof.map((line) => `Transcript proof: ${line}`),
+        ]).slice(0, 8),
+      };
+    });
+
+    if (!changed) {
+      return projectCtx;
+    }
+
+    const nextContext: ProjectContext = {
+      ...projectCtx,
+      intentBrief: {
+        ...projectCtx.intentBrief,
+        acceptanceLedger: updatedLedger,
+      },
+    };
+
+    try {
+      saveProjectContext(nextContext);
+    } catch {
+      // best-effort sync; guard logic can still use the in-memory update
+    }
+
+    if (!session) {
+      this.projectContext = nextContext;
+    }
+
+    return nextContext;
+  }
+
+  private getNextOpenAcceptanceLedgerItem(projectCtx: ProjectContext | null): { label: string } | null {
+    return projectCtx?.intentBrief?.acceptanceLedger?.find((item) => item.status !== "proven") ?? null;
+  }
+
+  private buildRestartWorkerMessage(nextOpenLabel: string): string {
+    return `Continue. The last proof cluster is already settled. Restart from the next still-open ledger item: ${nextOpenLabel}. First verify what proof already exists for that item, then take the smallest concrete step that advances or closes it. Do not reopen superseded green runs unless they materially block this item.`;
+  }
+
+  private maybeRecoverStalledGuild(
+    result: SuggestionResult,
+    session: SessionInfo | undefined,
+    projectCtx: ProjectContext | null,
+  ): SuggestionResult {
+    if (!session) {
+      return result;
+    }
+
+    if (inferRoscoeDecision(result) === "restart-worker") {
+      return result;
+    }
+
+    if (inferRoscoeDecision(result) !== "needs-review") {
+      return result;
+    }
+
+    if (this.buildIncrementalConversationContext(session).trim()) {
+      return result;
+    }
+
+    const nextOpen = this.getNextOpenAcceptanceLedgerItem(projectCtx);
+    if (!nextOpen) {
+      return result;
+    }
+
+    const combined = `${result.text}\n${result.reasoning}`;
+    if (!STALLED_GUILD_REVIEW_PATTERN.test(combined)) {
+      return result;
+    }
+
+    return {
+      ...result,
+      decision: "restart-worker",
+      text: this.buildRestartWorkerMessage(nextOpen.label),
+      confidence: Math.max(82, Math.min(result.confidence, 92)),
+      reasoning: `Guild stall self-heal: ${nextOpen.label} is still open, no new Guild delta landed, and Roscoe is restarting the lane on the next concrete ledger item instead of asking the developer whether to resend the prompt.`,
+    };
+  }
+
+  private maybeStrengthenArbiterConviction(
+    result: SuggestionResult,
+    projectCtx: ProjectContext | null,
+  ): SuggestionResult {
+    if (getWorkerGovernanceMode(projectCtx) !== "roscoe-arbiter") {
+      return result;
+    }
+
+    if (inferRoscoeDecision(result) === "noop" || inferRoscoeDecision(result) === "host-actions-only") {
+      return result;
+    }
+
+    const combined = `${result.text}\n${result.reasoning}`;
+    if (!DEFERENTIAL_TAIL_PATTERN.test(combined)) {
+      return result;
+    }
+
+    if (EXPLICIT_APPROVAL_BOUNDARY_PATTERN.test(combined)) {
+      return result;
+    }
+
+    let nextText = result.text.trim();
+    if (!nextText) {
+      return result;
+    }
+
+    nextText = nextText
+      .replace(/\bThe alternative is[\s\S]*$/i, "")
+      .replace(/\b(your call|if you want|want me to|would you prefer|up to you)\b[\s\S]*$/i, "")
+      .replace(/\bthis should go to the developer\b[\s\S]*$/i, "")
+      .replace(/\bdefer to the developer\b[\s\S]*$/i, "")
+      .trim();
+
+    if (!nextText || nextText === result.text.trim()) {
+      return result;
+    }
+
+    nextText = nextText.replace(/^Recommendation:\s*/i, "Proceed with this: ");
+
+    return {
+      ...result,
+      decision: "message",
+      text: nextText,
+      confidence: Math.max(84, Math.min(result.confidence, 94)),
+      reasoning: "Roscoe arbiter conviction: the onboarding brief already resolves this trade-off, so Roscoe should direct the stronger path instead of deferring it back to the developer.",
+    };
+  }
+
+  private detectLiveDeployedContradiction(
+    conversationContext: string,
+    projectCtx: ProjectContext | null,
+    result: SuggestionResult,
+  ): { triggered: boolean; evidence?: string } {
+    const deploymentArtifact = projectCtx?.intentBrief?.deploymentContract?.artifactType?.toLowerCase() ?? "";
+    const hasHostedStory = Boolean(
+      projectCtx?.intentBrief?.deploymentContract
+      || /\bweb app\b|\bsite\b|\bfrontend\b|\bembed\b|\bbuilder\b/.test(deploymentArtifact),
+    );
+    if (!hasHostedStory) {
+      return { triggered: false };
+    }
+
+    const recentLines = this.getRecentTranscriptLines(conversationContext).slice(-24);
+    const contradictionLine = [...recentLines]
+      .reverse()
+      .find((line) => DEPLOYED_CONTRADICTION_PATTERN.test(line));
+    if (!contradictionLine) {
+      return { triggered: false };
+    }
+
+    const combined = `${result.text}\n${result.reasoning}`;
+    const isAlreadyDebugging = DEPLOYED_DEBUG_PATTERN.test(combined);
+    const looksClosedOrIdle = inferRoscoeDecision(result) === "noop"
+      || CLOSURE_SIGNAL_PATTERN.test(combined);
+
+    if (!looksClosedOrIdle || isAlreadyDebugging) {
+      return { triggered: false };
+    }
+
+    return {
+      triggered: true,
+      evidence: clipText(contradictionLine, 220),
+    };
+  }
+
+  private wasRecentEquivalentGuardAlreadySent(
+    conversationContext: string,
+    text: string,
+  ): boolean {
+    if (!text.trim()) {
+      return false;
+    }
+    return normalizeComparisonText(conversationContext).includes(normalizeComparisonText(text));
+  }
+
   private applyDraftGuards(
     result: SuggestionResult,
     conversationContext: string,
     projectCtx: ProjectContext | null,
   ): SuggestionResult {
+    const contradiction = this.detectLiveDeployedContradiction(conversationContext, projectCtx, result);
+    if (contradiction.triggered) {
+      return {
+        ...result,
+        decision: "message",
+        text: `Do not close or hold this lane. The developer just reproduced the issue on the deployed environment: ${contradiction.evidence}. Enter contradiction mode now: verify the active rollout/pod, pull recent pod or server logs on the failing auth path, compare the live callback params/cookies against the expected state handling, and only then ship the next fix and re-prove it on the deployed URL.`,
+        confidence: 94,
+        reasoning: "Developer-reported deployed failure outranks green CI or closure summaries until the live contradiction is explained with direct runtime evidence.",
+      };
+    }
+
     const signals = this.detectFakeGreenSignals(conversationContext, projectCtx);
     const prematureParking = this.detectPrematureMilestoneParking(result, projectCtx);
     if ((!this.shouldGuardAgainstFakeGreen(result.text) || signals.length === 0) && !prematureParking.triggered) {
@@ -742,9 +1316,23 @@ Confidence guide:
       evidence.push(prematureParking.reason);
     }
 
+    const correctionText = `${canAutoSendCorrection ? "Continue." : "Do not park or call this done yet."} ${loadRoscoeSettings().behavior.parkAtMilestonesForReview ? "Operator-facing blockers remain" : "Milestone parking is off by default, and meaningful work remains"}: ${labels.join("; ")}. Keep the next slice focused on the next concrete, finish-seeking step instead of deferring it to a future lane.`;
+    if (canAutoSendCorrection && this.wasRecentEquivalentGuardAlreadySent(conversationContext, correctionText)) {
+      return {
+        ...result,
+        decision: "noop",
+        confidence: Math.min(result.confidence, 68),
+        reasoning: evidence.length > 0
+          ? `Repeated continuation guard suppressed: ${labels.join("; ")}. Evidence: ${evidence.slice(0, 2).join(" | ")}.`
+          : `Repeated continuation guard suppressed: ${labels.join("; ")}.`,
+        text: "Hold. The same continuation guidance is already in the lane transcript; wait for a materially different Guild update or fresh proof before restating it.",
+      };
+    }
+
     return {
       ...result,
-      text: `${canAutoSendCorrection ? "Continue." : "Do not park or call this done yet."} ${loadRoscoeSettings().behavior.parkAtMilestonesForReview ? "Operator-facing blockers remain" : "Milestone parking is off by default, and meaningful work remains"}: ${labels.join("; ")}. Keep the next slice focused on the next concrete, finish-seeking step instead of deferring it to a future lane.`,
+      decision: "message",
+      text: correctionText,
       confidence: canAutoSendCorrection
         ? Math.max(82, Math.min(result.confidence, 92))
         : Math.min(result.confidence, 45),
@@ -781,6 +1369,7 @@ Confidence guide:
     const sidecarPrompt = this.loadSidecarPrompt();
     const hasBrowser = this.browser !== null;
     const hasOrchestrator = projectCtx !== null;
+    const hasHostActions = session !== undefined;
 
     return `${sidecarPrompt}
 
@@ -794,7 +1383,7 @@ ${context}
 
 This is the persistent hidden Roscoe responder thread for this lane. Keep the stable project contract, runtime policy, and lane context in memory. Future turns may send only incremental lane deltas unless Roscoe explicitly reseeds you.
 
-${this.getStructuredResponseInstructions(hasBrowser, hasOrchestrator)}`;
+${this.getStructuredResponseInstructions(hasBrowser, hasOrchestrator, hasHostActions)}`;
   }
 
   private async buildResponderFollowUpPrompt(
@@ -824,7 +1413,7 @@ ${this.getStructuredResponseInstructions(hasBrowser, hasOrchestrator)}`;
     }
 
     parts.push("");
-    parts.push(this.getStructuredResponseInstructions(this.browser !== null, projectCtx !== null));
+    parts.push(this.getStructuredResponseInstructions(this.browser !== null, projectCtx !== null, session !== undefined));
     return parts.join("\n");
   }
 
@@ -1016,9 +1605,10 @@ ${this.getStructuredResponseInstructions(hasBrowser, hasOrchestrator)}`;
     onTrace?: (trace: SuggestionTrace) => void,
     onUsage?: (usage: RuntimeUsageSnapshot) => void,
   ): Promise<SuggestionResult> {
-    const projectCtx = session
+    let projectCtx = session
       ? this.loadSessionProjectContext(session)
       : this.projectContext;
+    projectCtx = this.syncAcceptanceLedgerFromTranscript(conversationContext, projectCtx, session);
     if (session && !session.responderMonitor) {
       throw new Error("Roscoe responder session is required for lane-backed drafting");
     }
@@ -1027,7 +1617,7 @@ ${this.getStructuredResponseInstructions(hasBrowser, hasOrchestrator)}`;
       ? loadProfile(getDefaultProfileName(responderProvider))
       : session?.profile ?? inferProfile(llmName);
     const runtimePlan = recommendResponderRuntime(baseProfile, conversationContext, projectCtx);
-    const sidecarProfile = runtimePlan.profile;
+    const sidecarProfile = this.sanitizeResponderProfileForDrafting(runtimePlan.profile);
     const useStatefulResponder = Boolean(session);
     const isSeedTurn = useStatefulResponder
       ? !session?.responderMonitor?.getSessionId() || (session?.responderHistoryCursor ?? 0) === 0
@@ -1060,11 +1650,48 @@ ${this.getStructuredResponseInstructions(this.browser !== null, projectCtx !== n
         : runtimePlan.rationale,
     });
 
-    const rawResult = useStatefulResponder
-      ? await this.generateSuggestionStateful(prompt, sidecarProfile, session!, onPartial, onUsage)
-      : await this.generateSuggestionStateless(prompt, sidecarProfile, onPartial);
+    let rawResult: SuggestionResult;
+    try {
+      rawResult = useStatefulResponder
+        ? await this.generateSuggestionStateful(prompt, sidecarProfile, session!, onPartial, onUsage)
+        : await this.generateSuggestionStateless(prompt, sidecarProfile, onPartial);
+    } catch (error) {
+      if (!useStatefulResponder || !this.shouldRetryStatefulResponder(error, session!)) {
+        throw error;
+      }
 
-    return this.applyDraftGuards(rawResult, conversationContext, projectCtx);
+      this.resetStatefulResponder(session!);
+      const reseedPrompt = await this.buildResponderSeedPrompt(conversationContext, llmName, session, projectCtx);
+      onTrace?.({
+        prompt: reseedPrompt,
+        commandPreview: buildCommandPreview(sidecarProfile),
+        runtimeSummary: runtimePlan.summary || summarizeRuntime(sidecarProfile),
+        strategy: runtimePlan.strategy,
+        rationale: `${runtimePlan.rationale} Roscoe cleared a failed hidden responder thread and reseeded it from the current lane state.`,
+      });
+      rawResult = await this.generateSuggestionStateful(reseedPrompt, sidecarProfile, session!, onPartial, onUsage);
+    }
+
+    if (
+      useStatefulResponder
+      && rawResult.reasoning === MALFORMED_STRUCTURED_DRAFT_REASONING
+      && session?.responderMonitor?.getSessionId()
+    ) {
+      this.resetStatefulResponder(session!);
+      const reseedPrompt = await this.buildResponderSeedPrompt(conversationContext, llmName, session, projectCtx);
+      onTrace?.({
+        prompt: reseedPrompt,
+        commandPreview: buildCommandPreview(sidecarProfile),
+        runtimeSummary: runtimePlan.summary || summarizeRuntime(sidecarProfile),
+        strategy: runtimePlan.strategy,
+        rationale: `${runtimePlan.rationale} Roscoe cleared a malformed hidden responder draft and reseeded it from the current lane state.`,
+      });
+      rawResult = await this.generateSuggestionStateful(reseedPrompt, sidecarProfile, session!, onPartial, onUsage);
+    }
+
+    const recoveredResult = this.maybeRecoverStalledGuild(rawResult, session, projectCtx);
+    const strengthenedResult = this.maybeStrengthenArbiterConviction(recoveredResult, projectCtx);
+    return this.applyDraftGuards(strengthenedResult, conversationContext, projectCtx);
   }
 
   meetsThreshold(result: SuggestionResult): boolean {

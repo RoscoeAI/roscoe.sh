@@ -220,6 +220,45 @@ describe("runtime-defaults", () => {
     });
   });
 
+  it("defaults autonomous worker profiles to accelerated unless the project explicitly pins safe mode", () => {
+    const workerBase: HeadlessProfile = {
+      name: "codex",
+      command: "codex",
+      args: [],
+      protocol: "codex",
+      runtime: {
+        model: "gpt-5.4",
+      },
+    };
+
+    expect(getWorkerProfileForProject(workerBase, null, null).runtime).toMatchObject({
+      executionMode: "accelerated",
+      bypassApprovalsAndSandbox: true,
+    });
+
+    expect(getWorkerProfileForProject(workerBase, {
+      name: "proj",
+      directory: "/tmp/proj",
+      goals: [],
+      milestones: [],
+      techStack: [],
+      notes: "",
+      runtimeDefaults: {
+        workerByProtocol: {
+          codex: {
+            executionMode: "safe",
+            sandboxMode: "workspace-write",
+            approvalPolicy: "never",
+          },
+        },
+      },
+    } as any, null).runtime).toMatchObject({
+      executionMode: "safe",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+    });
+  });
+
   it("keeps manual runtime settings pinned", () => {
     const profile: HeadlessProfile = {
       name: "claude-code",

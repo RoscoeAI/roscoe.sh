@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, copyFi
 import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { randomUUID } from "crypto";
 import { AuthProfile } from "./browser-agent.js";
 import {
@@ -19,6 +19,7 @@ import type { PreviewState, SessionStatus, TranscriptEntry } from "./types.js";
 import type { PendingOperatorMessage } from "./types.js";
 import type { Message } from "./conversation-tracker.js";
 import {
+  inferRoscoeDecision,
   normalizeLegacySidecarErrorText,
   normalizeRoscoeDraftMessage,
   parseRoscoeDraftPayload,
@@ -307,7 +308,7 @@ export function resolveProjectRoot(projectDir: string): string {
   if (cached) return cached;
 
   try {
-    const root = execSync("git rev-parse --show-toplevel", {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       cwd: dir,
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf-8",
@@ -784,12 +785,23 @@ function compactPendingSuggestions(entries: TranscriptEntry[]): TranscriptEntry[
   );
 }
 
+function dismissStaleNoOpSuggestions(entries: TranscriptEntry[]): TranscriptEntry[] {
+  return entries.map((entry) => {
+    if (entry.kind !== "local-suggestion" || entry.state !== "pending") {
+      return entry;
+    }
+    return inferRoscoeDecision({ message: entry.text, reasoning: entry.reasoning }) === "noop"
+      ? { ...entry, state: "dismissed" as const }
+      : entry;
+  });
+}
+
 function normalizeTranscript(value: unknown): TranscriptEntry[] {
   if (!Array.isArray(value)) return [];
   const entries = value
     .map((item) => normalizeTranscriptEntry(item))
     .filter((item): item is TranscriptEntry => item !== null);
-  return compactRedundantParkedConversation(compactPendingSuggestions(entries));
+  return compactRedundantParkedConversation(dismissStaleNoOpSuggestions(compactPendingSuggestions(entries)));
 }
 
 function normalizeLaneSessionRecord(value: unknown): LaneSessionRecord | null {

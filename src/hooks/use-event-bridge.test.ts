@@ -114,6 +114,10 @@ class FakeMonitor extends EventEmitter {
 
   getSessionId = vi.fn(() => this.sessionId);
 
+  restoreSessionId = vi.fn((sessionId: string | null) => {
+    this.sessionId = sessionId;
+  });
+
   kill = vi.fn();
 }
 
@@ -198,6 +202,7 @@ describe("buildInitialPrompt", () => {
       notes: "",
       runtimeDefaults: {
         verificationCadence: "batched",
+        tokenEfficiencyMode: "balanced",
       },
       intentBrief: {
         projectStory: "Ship safely",
@@ -230,6 +235,69 @@ describe("buildInitialPrompt", () => {
     expect(prompt).toContain("Verification cadence: batch the heavy proof stack");
   });
 
+  it("uses a compact startup digest in save-tokens mode", () => {
+    const ctx: ProjectContext = {
+      name: "proj",
+      directory: "/tmp",
+      goals: ["ship v1", "keep proof honest", "avoid drift"],
+      milestones: [],
+      techStack: ["React", "TypeScript", "Vitest", "Playwright", "Prisma"],
+      notes: "Long notes should be clipped before they become prompt bloat for the worker runtime.",
+      runtimeDefaults: {
+        verificationCadence: "batched",
+        tokenEfficiencyMode: "save-tokens",
+      },
+      intentBrief: {
+        projectStory: "Ship safely",
+        primaryUsers: ["operators"],
+        definitionOfDone: ["Frontend and backend workflows meet the operator outcome", "Hosted proof is truthful"],
+        acceptanceChecks: ["Measured coverage proves the full workflow", "Hosted CI stays green"],
+        successSignals: ["operators can finish the task"],
+        acceptanceLedger: [
+          { label: "Preview runner proves health", status: "open", evidence: [], notes: "" },
+          { label: "Webhook flow proves hosted path", status: "proven", evidence: [], notes: "" },
+        ],
+        deliveryPillars: {
+          frontend: ["Frontend flow is complete"],
+          backend: ["Backend API flow is complete"],
+          unitComponentTests: ["Unit/component tests prove changed frontend/backend behavior with reasonable coverage across regressions and edge cases"],
+          e2eTests: ["E2E tests prove the full workflow with risk-based coverage across success and failure modes"],
+        },
+        coverageMechanism: ["Vitest and Playwright runs provide the canonical validation path for this repo"],
+        deploymentContract: {
+          artifactType: "web-app",
+          mode: "planned-greenfield",
+          summary: "Hosted proof is required before this can be called complete.",
+          platforms: ["Fly.io", "GitHub Actions"],
+          environments: ["preview", "production"],
+          buildSteps: ["pnpm build", "docker build preview-runner"],
+          deploySteps: ["fly deploy preview-runner"],
+          previewStrategy: ["Deploy preview runner before production cutover"],
+          presenceStrategy: ["Keep stage.appsicle.ai truthful as slices land"],
+          proofTargets: ["stage.appsicle.ai", "preview URL from Fly"],
+          healthChecks: ["GET /health returns ready true"],
+          rollback: ["Redeploy previous Fly image"],
+          requiredSecrets: ["FLY_API_TOKEN", "PREVIEW_RUNNER_IMAGE"],
+        },
+        nonGoals: ["rewriting the stack"],
+        constraints: [],
+        architecturePrinciples: ["Reuse shared workflow modules and keep audit logging consistent across material writes"],
+        autonomyRules: ["Continue when the next slice is obvious"],
+        qualityBar: ["Do not call done without hosted proof"],
+        riskBoundaries: ["Do not silently swallow preview boot failures"],
+        uiDirection: "",
+      },
+    };
+
+    const prompt = buildInitialPrompt(makeManagedSession(), ctx);
+    expect(prompt).toContain("Keep check-ins terse");
+    expect(prompt).toContain("Token efficiency mode: save tokens.");
+    expect(prompt).toContain("Acceptance ledger: Preview runner proves health [open]");
+    expect(prompt).not.toContain("Frontend pillar:");
+    expect(prompt).not.toContain("Architecture principles:");
+    expect(prompt).not.toContain("Deployment platforms:");
+  });
+
   it("includes task/branch for non-main worktrees", () => {
     const managed = makeManagedSession({ worktreeName: "fix-auth" });
     const prompt = buildInitialPrompt(managed, {
@@ -244,6 +312,7 @@ describe("buildInitialPrompt", () => {
       },
     });
     expect(prompt).toContain("fix-auth");
+    expect(prompt).toContain("Access mode: safe sandboxed execution is enabled for this lane.");
     expect(prompt).toContain("Work in thin vertical slices");
     expect(prompt).toContain("Use risk-based verification");
     expect(prompt).toContain("Do not mechanically rerun the full repo-wide proof stack");
@@ -342,6 +411,7 @@ describe("buildInitialPrompt", () => {
     expect(prompt).toContain("Worker provider is locked to codex");
     expect(prompt).toContain("Roscoe is responding from the claude provider while you execute on codex.");
     expect(prompt).toContain("Runtime tuning mode: manual.");
+    expect(prompt).toContain("Access mode: safe sandboxed execution is enabled for this lane.");
     expect(prompt).toContain("Governance mode: Guild autonomous.");
     expect(prompt).toContain("Entry surface contract: Default route should explain preview readiness.");
     expect(prompt).toContain("Local prerequisites: Postgres running; Fly token set.");
@@ -522,7 +592,7 @@ describe("handleGeneratedSuggestion", () => {
 
   it("auto-sends resumed suggestions when AUTO mode is enabled and the draft clears threshold", async () => {
     const dispatch = vi.fn();
-    const executeSuggestion = vi.fn().mockResolvedValue(undefined);
+    const executeSuggestion = vi.fn().mockResolvedValue("Keep the fix narrow and rerun coverage.");
     const service = {
       executeSuggestion,
       maybeNotifyIntervention: vi.fn().mockResolvedValue(undefined),
@@ -532,6 +602,7 @@ describe("handleGeneratedSuggestion", () => {
     };
     const managed = { awaitingInput: true } as any;
     const result = {
+      decision: "message" as const,
       text: "Keep the fix narrow and rerun coverage.",
       confidence: 94,
       reasoning: "The transcript already points to the next proof step.",
@@ -539,19 +610,44 @@ describe("handleGeneratedSuggestion", () => {
 
     await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-1", result, true);
 
-    expect(service.generator.meetsThreshold).toHaveBeenCalledWith(result);
     expect(executeSuggestion).toHaveBeenCalledWith(managed, result);
     expect(dispatch).toHaveBeenNthCalledWith(1, { type: "SUGGESTION_READY", id: "lane-1", result });
-    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "AUTO_SENT", id: "lane-1", text: result.text, confidence: 94 });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "AUTO_SENT", id: "lane-1", text: "Keep the fix narrow and rerun coverage.", confidence: 94 });
     expect(dispatch).toHaveBeenNthCalledWith(3, { type: "SYNC_MANAGED_SESSION", id: "lane-1", managed });
 
     vi.runAllTimers();
     expect(dispatch).toHaveBeenLastCalledWith({ type: "CLEAR_AUTO_SENT", id: "lane-1" });
   });
 
+  it("auto-sends restart-worker decisions when AUTO mode is enabled and the draft clears threshold", async () => {
+    const dispatch = vi.fn();
+    const executeSuggestion = vi.fn().mockResolvedValue("Continue. Restart from the next still-open ledger item: NEXT.md: AI generation bug triage complete.");
+    const service = {
+      executeSuggestion,
+      maybeNotifyIntervention: vi.fn().mockResolvedValue(undefined),
+      generator: {
+        meetsThreshold: vi.fn().mockReturnValue(true),
+      },
+    };
+    const managed = { awaitingInput: true } as any;
+    const result = {
+      decision: "restart-worker" as const,
+      text: "Continue. Restart from the next still-open ledger item: NEXT.md: AI generation bug triage complete.",
+      confidence: 87,
+      reasoning: "Guild stall self-heal: NEXT.md remains open, so Roscoe is restarting the Guild lane on that slice.",
+    };
+
+    await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-1b", result, true);
+
+    expect(executeSuggestion).toHaveBeenCalledWith(managed, result);
+    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "SUGGESTION_READY", id: "lane-1b", result });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "AUTO_SENT", id: "lane-1b", text: result.text, confidence: 87 });
+    expect(dispatch).toHaveBeenNthCalledWith(3, { type: "SYNC_MANAGED_SESSION", id: "lane-1b", managed });
+  });
+
   it("leaves resumed suggestions in review when AUTO mode is off", async () => {
     const dispatch = vi.fn();
-    const executeSuggestion = vi.fn().mockResolvedValue(undefined);
+    const executeSuggestion = vi.fn().mockResolvedValue("Do the next proof step.");
     const service = {
       executeSuggestion,
       maybeNotifyIntervention: vi.fn().mockResolvedValue(undefined),
@@ -578,7 +674,7 @@ describe("handleGeneratedSuggestion", () => {
 
   it("holds a generated suggestion when a preview break is armed", async () => {
     const dispatch = vi.fn();
-    const executeSuggestion = vi.fn().mockResolvedValue(undefined);
+    const executeSuggestion = vi.fn().mockResolvedValue("Ask the worker to keep going.");
     const service = {
       executeSuggestion,
       maybeNotifyIntervention: vi.fn().mockResolvedValue(undefined),
@@ -608,7 +704,7 @@ describe("handleGeneratedSuggestion", () => {
     const dispatch = vi.fn();
     const maybeNotifyIntervention = vi.fn().mockResolvedValue(undefined);
     const service = {
-      executeSuggestion: vi.fn().mockResolvedValue(undefined),
+      executeSuggestion: vi.fn().mockResolvedValue(""),
       maybeNotifyIntervention,
       generator: {
         meetsThreshold: vi.fn().mockReturnValue(false),
@@ -633,6 +729,142 @@ describe("handleGeneratedSuggestion", () => {
       detail: "Roscoe is holding the next Guild turn and wants your direction before sending anything.",
     });
     expect(service.executeSuggestion).not.toHaveBeenCalled();
+  });
+
+  it("treats duplicate-suppressed continuation guards as a no-op instead of review", async () => {
+    const dispatch = vi.fn();
+    const service = {
+      executeSuggestion: vi.fn(),
+      maybeNotifyIntervention: vi.fn().mockResolvedValue(undefined),
+      generator: {
+        meetsThreshold: vi.fn().mockReturnValue(false),
+      },
+    };
+    const managed = { awaitingInput: true } as any;
+    const result = {
+      decision: "noop" as const,
+      text: "Hold. The same continuation guidance is already in the lane transcript; wait for a materially different Guild update or fresh proof before restating it.",
+      confidence: 68,
+      reasoning: "Repeated continuation guard suppressed: acceptance ledger still open: RosterStream: Clever SSO proven.",
+    };
+
+    await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-5", result, true);
+
+    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "REJECT_SUGGESTION", id: "lane-5" });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "SYNC_MANAGED_SESSION", id: "lane-5", managed });
+    expect(service.executeSuggestion).not.toHaveBeenCalled();
+    expect(service.maybeNotifyIntervention).not.toHaveBeenCalled();
+  });
+
+  it("treats empty no-op hold drafts as a no-op instead of review", async () => {
+    const dispatch = vi.fn();
+    const service = {
+      executeSuggestion: vi.fn(),
+      maybeNotifyIntervention: vi.fn().mockResolvedValue(undefined),
+      generator: {
+        meetsThreshold: vi.fn().mockReturnValue(false),
+      },
+    };
+    const managed = { awaitingInput: true } as any;
+    const result = {
+      text: "",
+      confidence: 40,
+      reasoning: "No new Guild turns and the existing direction is clear; sending another message would be noise — only CI results would change the conversation state.",
+    };
+
+    await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-6", result, true);
+
+    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "REJECT_SUGGESTION", id: "lane-6" });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "SYNC_MANAGED_SESSION", id: "lane-6", managed });
+    expect(service.executeSuggestion).not.toHaveBeenCalled();
+    expect(service.maybeNotifyIntervention).not.toHaveBeenCalled();
+  });
+
+  it("treats the 'no new Guild activity' empty hold variant as a no-op instead of review", async () => {
+    const dispatch = vi.fn();
+    const service = {
+      executeSuggestion: vi.fn(),
+      maybeNotifyIntervention: vi.fn().mockResolvedValue(undefined),
+      generator: {
+        meetsThreshold: vi.fn().mockReturnValue(false),
+      },
+    };
+    const managed = { awaitingInput: true } as any;
+    const result = {
+      text: "",
+      confidence: 30,
+      reasoning: "No new Guild activity and the existing direction is clear; sending another message would be pure noise. Only fresh CI results or a Guild response would change the conversation state.",
+    };
+
+    await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-7", result, true);
+
+    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "REJECT_SUGGESTION", id: "lane-7" });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "SYNC_MANAGED_SESSION", id: "lane-7", managed });
+    expect(service.executeSuggestion).not.toHaveBeenCalled();
+    expect(service.maybeNotifyIntervention).not.toHaveBeenCalled();
+  });
+
+  it("auto-executes host-side gh polling drafts instead of surfacing them as review", async () => {
+    const dispatch = vi.fn();
+    const executeSuggestion = vi.fn().mockResolvedValue(
+      "Roscoe ran host-side GitHub CLI checks to verify hosted CI from the local machine.\n- `gh run list --branch test --limit 3`: completed success",
+    );
+    const service = {
+      executeSuggestion,
+      maybeNotifyIntervention: vi.fn().mockResolvedValue(undefined),
+      generator: {
+        meetsThreshold: vi.fn().mockReturnValue(false),
+      },
+    };
+    const managed = { awaitingInput: true } as any;
+    const result = {
+      text: "",
+      confidence: 30,
+      reasoning: "No new Guild activity and the existing direction is clear; sending another message would be pure noise. Only fresh CI results or a Guild response would change the conversation state.",
+      hostActions: [
+        {
+          type: "gh" as const,
+          args: ["run", "list", "--branch", "test", "--limit", "3"],
+          description: "check if any test-branch runs have completed",
+        },
+      ],
+    };
+
+    await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-8", result, true);
+
+    expect(executeSuggestion).toHaveBeenCalledWith(managed, result);
+    expect(dispatch).toHaveBeenNthCalledWith(1, {
+      type: "AUTO_SENT",
+      id: "lane-8",
+      text: "Roscoe ran host-side GitHub CLI checks to verify hosted CI from the local machine.\n- `gh run list --branch test --limit 3`: completed success",
+      confidence: 30,
+    });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "SYNC_MANAGED_SESSION", id: "lane-8", managed });
+    expect(service.maybeNotifyIntervention).not.toHaveBeenCalled();
+  });
+
+  it("treats repeated no-activity hold drafts as a no-op instead of review", async () => {
+    const dispatch = vi.fn();
+    const service = {
+      executeSuggestion: vi.fn(),
+      maybeNotifyIntervention: vi.fn().mockResolvedValue(undefined),
+      generator: {
+        meetsThreshold: vi.fn().mockReturnValue(false),
+      },
+    };
+    const managed = { awaitingInput: true } as any;
+    const result = {
+      text: "",
+      confidence: 20,
+      reasoning: "Fourth consecutive no-activity delta; the NEXT.md triage direction was already sent clearly, Guild has not responded, and repeated CI polls are not producing new information — Roscoe should hold silently until a Guild turn or CI completion surfaces.",
+    };
+
+    await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-9", result, true);
+
+    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "REJECT_SUGGESTION", id: "lane-9" });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "SYNC_MANAGED_SESSION", id: "lane-9", managed });
+    expect(service.executeSuggestion).not.toHaveBeenCalled();
+    expect(service.maybeNotifyIntervention).not.toHaveBeenCalled();
   });
 });
 
@@ -796,6 +1028,79 @@ describe("useEventBridge", () => {
     expect(dispatch).toHaveBeenCalledWith({ type: "START_GENERATING", id: session.id });
   });
 
+  it("autonomously rechecks a waiting lane after a dismissed no-op hold when ledger work remains", async () => {
+    vi.useFakeTimers();
+    const session = createBridgeSession({
+      timeline: [
+        {
+          id: "remote-1",
+          kind: "remote-turn",
+          timestamp: 1,
+          provider: "codex",
+          text: "Hosted proof landed. Decide the next slice.",
+        },
+        {
+          id: "noop-1",
+          kind: "local-suggestion",
+          timestamp: 2,
+          text: "",
+          confidence: 20,
+          reasoning: "Fourth consecutive no-activity delta; no new Guild turns and sending another message would be noise.",
+          state: "dismissed",
+        },
+      ],
+    });
+    session.managed.awaitingInput = false;
+    const responderMonitor = session.managed.responderMonitor as unknown as FakeMonitor;
+    const dispatch = vi.fn();
+    const service = createService();
+    vi.spyOn(config, "loadProjectContext").mockReturnValue({
+      name: "proj",
+      directory: "/tmp/myproject",
+      goals: [],
+      milestones: [],
+      techStack: [],
+      notes: "",
+      intentBrief: {
+        projectStory: "Keep working until the real ledger closes.",
+        primaryUsers: ["operators"],
+        definitionOfDone: ["Open ledger items are proven."],
+        acceptanceChecks: ["Roscoe keeps slices moving."],
+        successSignals: ["No idle waiting while meaningful work remains."],
+        acceptanceLedger: [
+          { label: "Hosted proof promoted", status: "open", evidence: [], notes: "" },
+        ],
+        deliveryPillars: {
+          frontend: [],
+          backend: [],
+          unitComponentTests: [],
+          e2eTests: [],
+        },
+        coverageMechanism: [],
+        nonGoals: [],
+        constraints: [],
+        uiDirection: "",
+      },
+    } as any);
+
+    render(React.createElement(BridgeHarness, { sessions: new Map([[session.id, session]]), dispatch, service, autoMode: true }));
+    await flushEffects();
+    await flushEffects();
+
+    expect(service.generateSuggestion).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushEffects();
+    await flushEffects();
+
+    expect(responderMonitor.restoreSessionId).toHaveBeenCalledWith(null);
+    expect(session.managed.responderHistoryCursor).toBe(0);
+    expect(session.managed.lastResponderPrompt).toBeNull();
+    expect(dispatch).toHaveBeenCalledWith({ type: "SYNC_MANAGED_SESSION", id: session.id, managed: session.managed });
+    expect(service.generateSuggestion).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith({ type: "START_GENERATING", id: session.id });
+  });
+
   it("re-blocks a lane on mount when the last remote turn is a pause acknowledgement", async () => {
     const session = createBridgeSession({
       timeline: [{
@@ -929,6 +1234,34 @@ describe("useEventBridge", () => {
       },
     });
     expect(dispatch).toHaveBeenCalledWith({ type: "SYNC_MANAGED_SESSION", id: session.id, managed: session.managed });
+  });
+
+  it("keeps only a bounded rolling output window for long-running worker streams", async () => {
+    vi.useFakeTimers();
+
+    const session = createBridgeSession();
+    const monitor = session.managed.monitor as unknown as FakeMonitor;
+    const dispatch = vi.fn();
+    const service = createService();
+
+    render(React.createElement(BridgeHarness, { sessions: new Map([[session.id, session]]), dispatch, service, autoMode: true }));
+    await flushEffects();
+
+    const hugeChunk = `${"alpha\n".repeat(4000)}omega`;
+    monitor.emit("text", hugeChunk);
+    vi.advanceTimersByTime(60);
+    await flushEffects();
+
+    const setOutputCalls = dispatch.mock.calls
+      .map(([action]) => action)
+      .filter((action) => action?.type === "SET_OUTPUT");
+    expect(setOutputCalls.length).toBeGreaterThan(0);
+
+    const latestSetOutput = setOutputCalls.at(-1);
+    expect(Array.isArray(latestSetOutput.lines)).toBe(true);
+    expect(latestSetOutput.lines.length).toBeLessThanOrEqual(601);
+    expect(latestSetOutput.lines.some((line: string) => line.includes("truncated older buffered output"))).toBe(true);
+    expect(latestSetOutput.lines.at(-1)).toContain("omega");
   });
 
   it("updates detail for repeated tool activity without appending a second tool entry", async () => {

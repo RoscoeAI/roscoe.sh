@@ -1,5 +1,6 @@
 import { resolve } from "path";
 import { homedir } from "os";
+import { execFile } from "child_process";
 import {
   getProjectContractFingerprint,
   loadLaneSession,
@@ -15,6 +16,7 @@ import {
   ResponseGenerator,
   SuggestionResult,
   BrowserAction,
+  HostAction,
   OrchestratorAction,
   SessionInfo,
 } from "../response-generator.js";
@@ -41,9 +43,77 @@ import {
   hasBoundedFutureWorkSignal,
   inferAwaitingInput,
   inferTerminalParkedState,
+  normalizeRestoredTimeline,
 } from "../session-transcript.js";
 import { recoverPreviewState } from "../session-preview.js";
 import { applyProjectEnvToProfile } from "../project-secrets.js";
+import { looksLikeRoscoeStructuredDraft } from "../roscoe-draft.js";
+
+const HOST_GIT_TIMEOUT_MS = 300_000;
+const HOST_GIT_MAX_BUFFER = 1024 * 1024;
+const HOST_GH_TIMEOUT_MS = 120_000;
+const HOST_GH_MAX_BUFFER = 1024 * 1024;
+const HOST_KUBECTL_TIMEOUT_MS = 120_000;
+const HOST_KUBECTL_MAX_BUFFER = 1024 * 1024;
+const ALLOWED_HOST_GIT_SUBCOMMANDS = new Set(["add", "commit", "push", "status", "diff", "log", "rev-parse", "show"]);
+const DISALLOWED_HOST_GIT_FLAGS = [
+  "-C",
+  "-c",
+  "--git-dir",
+  "--work-tree",
+  "--force",
+  "--force-with-lease",
+  "--mirror",
+  "--all",
+  "--delete",
+  "--amend",
+];
+const ALLOWED_HOST_GH_TOP_LEVEL = new Set(["run"]);
+const ALLOWED_HOST_GH_RUN_SUBCOMMANDS = new Set(["list", "view"]);
+const DISALLOWED_HOST_GH_FLAGS = [
+  "-R",
+  "--repo",
+  "--hostname",
+  "--jq",
+  "--template",
+  "--paginate",
+  "--web",
+  "--browser",
+];
+const ALLOWED_HOST_KUBECTL_GLOBAL_FLAGS = new Set(["--context", "-n", "--namespace", "--request-timeout"]);
+const ALLOWED_HOST_KUBECTL_FLAGS = new Set([
+  ...ALLOWED_HOST_KUBECTL_GLOBAL_FLAGS,
+  "-o",
+  "--output",
+  "-l",
+  "--selector",
+  "--tail",
+  "--since",
+  "--since-time",
+  "-c",
+  "--container",
+  "--all-containers",
+  "--timestamps",
+  "--ignore-errors",
+  "--all-namespaces",
+]);
+const HOST_KUBECTL_FLAGS_WITH_VALUE = new Set([
+  "--context",
+  "-n",
+  "--namespace",
+  "--request-timeout",
+  "-o",
+  "--output",
+  "-l",
+  "--selector",
+  "--tail",
+  "--since",
+  "--since-time",
+  "-c",
+  "--container",
+]);
+const ALLOWED_HOST_KUBECTL_SUBCOMMANDS = new Set(["config", "get", "describe", "logs", "rollout"]);
+const DISALLOWED_HOST_KUBECTL_FLAGS = new Set(["--kubeconfig", "-f", "--filename", "-k", "--server", "--token", "--as", "--as-group", "--raw"]);
 
 export class SessionManagerService {
   generator: ResponseGenerator;
@@ -102,7 +172,7 @@ export class SessionManagerService {
     const autoHealMetadata = behaviorSettings.autoHealMetadata;
     const parkAtMilestonesForReview = behaviorSettings.parkAtMilestonesForReview;
     const restoredLane = loadLaneSession(canonicalProjectDir, canonicalWorktreePath, worktreeName, effectiveProfileName);
-    const restoredTimeline = restoredLane?.timeline ?? [];
+    const restoredTimeline = normalizeRestoredTimeline(restoredLane?.timeline ?? []);
     const shouldRestoreNativeSessions = !autoHealMetadata || restoredLane?.status !== "exited";
     const restoredPreview = restoredLane
       ? recoverPreviewState(restoredLane.preview, {
@@ -123,6 +193,17 @@ export class SessionManagerService {
         );
     if (restoredLane?.trackerHistory?.length) {
       tracker.restoreHistory(restoredLane.trackerHistory);
+    }
+    if (restoredLane && JSON.stringify(restoredTimeline) !== JSON.stringify(restoredLane.timeline ?? [])) {
+      try {
+        saveLaneSession({
+          ...restoredLane,
+          timeline: restoredTimeline,
+          savedAt: restoredLane.savedAt,
+        });
+      } catch {
+        // best-effort self-heal on restore
+      }
     }
     if (shouldRestoreNativeSessions && restoredLane?.providerSessionId) {
       monitor.restoreSessionId(restoredLane.providerSessionId);
@@ -205,7 +286,7 @@ export class SessionManagerService {
             responderSessionId: shouldRestoreNativeSessions ? restoredLane.responderSessionId : null,
             trackerHistory: restoredLane.trackerHistory,
             responderHistoryCursor: restoredLane.responderHistoryCursor,
-            timeline: restoredLane.timeline,
+            timeline: restoredTimeline,
             preview: restoredPreview,
             outputLines: restoredLane.outputLines,
             summary: restoredLane.summary,
@@ -234,10 +315,12 @@ export class SessionManagerService {
     managed: ManagedSession,
     onPartial?: (text: string) => void,
     onUsage?: (usage: RuntimeUsageSnapshot) => void,
+    sessionStateResolver?: () => SessionState | null,
   ): Promise<SuggestionResult> {
     const context = managed.tracker.getContextForGeneration();
     const sessionInfo: SessionInfo = {
       profile: managed.profile,
+      responderProfile: managed.responderProfile,
       profileName: managed.profileName,
       projectName: managed.projectName,
       projectDir: managed.projectDir,
@@ -247,6 +330,23 @@ export class SessionManagerService {
       responderHistory: managed.tracker.getHistory(),
       responderHistoryCursor: managed.responderHistoryCursor,
     };
+    if (sessionStateResolver) {
+      sessionInfo.onResponderStateReset = () => {
+        managed.responderHistoryCursor = sessionInfo.responderHistoryCursor ?? 0;
+        const latestSession = sessionStateResolver();
+        if (!latestSession) {
+          return;
+        }
+        try {
+          this.persistSessionState({
+            ...latestSession,
+            managed,
+          });
+        } catch {
+          // Self-heal persistence is best-effort and must not block responder recovery.
+        }
+      };
+    }
 
     const result = await this.generator.generateSuggestion(
       context,
@@ -273,9 +373,9 @@ export class SessionManagerService {
   async executeSuggestion(
     managed: ManagedSession,
     result: SuggestionResult,
-  ): Promise<void> {
+  ): Promise<string> {
     if (!managed.awaitingInput) {
-      return;
+      return "";
     }
 
     // Mark the session as no longer awaiting input before injecting so
@@ -290,11 +390,25 @@ export class SessionManagerService {
       await this.executeOrchestratorActions(result.orchestratorActions);
     }
 
-    if (result.text.trim()) {
-      this.prepareWorkerTurn(managed, result.text);
-      managed.tracker.recordUserInput(result.text);
-      this.injector.inject(managed.monitor, result.text);
+    const hostReport = result.hostActions?.length
+      ? await this.executeHostActions(managed, result.hostActions)
+      : null;
+    const finalText = this.composeSuggestionText(result.text, hostReport);
+
+    if (looksLikeRoscoeStructuredDraft(finalText)) {
+      managed.awaitingInput = true;
+      return "";
     }
+
+    if (finalText.trim()) {
+      if (result.decision === "restart-worker") {
+        managed.monitor.restoreSessionId(null);
+      }
+      this.prepareWorkerTurn(managed, finalText);
+      managed.tracker.recordUserInput(finalText);
+      this.injector.inject(managed.monitor, finalText);
+    }
+    return finalText;
   }
 
   async generateSummary(managed: ManagedSession): Promise<string> {
@@ -497,6 +611,511 @@ export class SessionManagerService {
         // best-effort orchestrator actions
       }
     }
+  }
+
+  private composeSuggestionText(
+    suggestedText: string,
+    hostReport: { text: string; hadFailure: boolean } | null,
+  ): string {
+    const trimmedSuggestion = hostReport?.hadFailure
+      ? suggestedText.trim()
+      : this.sanitizeSuccessfulHostFollowUp(suggestedText);
+    if (!hostReport) {
+      return suggestedText;
+    }
+
+    if (hostReport.hadFailure) {
+      const failureGuide = "A host-side command failed. Continue from the real output above instead of assuming the local bridge step succeeded.";
+      return [hostReport.text, failureGuide, trimmedSuggestion].filter(Boolean).join("\n\n");
+    }
+
+    return [hostReport.text, trimmedSuggestion].filter(Boolean).join("\n\n");
+  }
+
+  private sanitizeSuccessfulHostFollowUp(text: string): string {
+    let next = text.trim();
+    if (!next) {
+      return next;
+    }
+
+    const stalePatterns = [
+      /\b[^.\n]*waiting on [^.\n]*approval[^.\n]*\.?/gi,
+      /\b[^.\n]*can't get [^.\n]* approved[^.\n]*\.?/gi,
+      /\b[^.\n]*hostactions didn't execute[^.\n]*\.?/gi,
+      /\b[^.\n]*commit is staged and ready[^.\n]*\.?/gi,
+      /\b[^.\n]*hasn't landed[^.\n]*\.?/gi,
+      /\b[^.\n]*ready to land[^.\n]*\.?/gi,
+      /\b[^.\n]*needs [^.\n]* approval[^.\n]*\.?/gi,
+    ];
+    for (const pattern of stalePatterns) {
+      next = next.replace(pattern, "");
+    }
+
+    next = next
+      .replace(/\bOnce pushed,\s*/gi, "")
+      .replace(/\bOnce approved,\s*/gi, "")
+      .replace(/\bOnce committed and pushed,\s*/gi, "")
+      .replace(/\bOnce that lands,\s*/gi, "")
+      .replace(/\bIf CI reports a failure on [^.\n]*, I'll relay it immediately\.?/gi, "");
+
+    next = next
+      .split(/\n{2,}/)
+      .map((paragraph) => paragraph.replace(/[ \t]+/g, " ").trim())
+      .map((paragraph) => paragraph.replace(/^[a-z]/, (char) => char.toUpperCase()))
+      .filter(Boolean)
+      .join("\n\n");
+
+    return next;
+  }
+
+  private async executeHostActions(
+    managed: ManagedSession,
+    actions: HostAction[],
+  ): Promise<{ text: string; hadFailure: boolean }> {
+    const outcomes: Array<{ type: HostAction["type"]; command: string; summary: string; ok: boolean }> = [];
+
+    for (const action of actions) {
+      if (action?.type === "git") {
+        outcomes.push({ type: "git", ...(await this.executeHostGitAction(managed, action)) });
+        continue;
+      }
+      if (action?.type === "gh") {
+        outcomes.push({ type: "gh", ...(await this.executeHostGhAction(managed, action)) });
+        continue;
+      }
+      if (action?.type === "kubectl") {
+        outcomes.push({ type: "kubectl", ...(await this.executeHostKubectlAction(managed, action)) });
+        continue;
+      }
+      else {
+        outcomes.push({
+          type: "git",
+          command: "unsupported",
+          summary: "failed: Roscoe only allows host-side git, gh run, and read-only kubectl actions in this path.",
+          ok: false,
+        });
+      }
+    }
+
+    const hadFailure = outcomes.some((outcome) => !outcome.ok);
+    const hasGit = outcomes.some((outcome) => outcome.type === "git");
+    const hasGh = outcomes.some((outcome) => outcome.type === "gh");
+    const hasKubectl = outcomes.some((outcome) => outcome.type === "kubectl");
+    const header = hadFailure
+      ? this.buildHostActionHeader({ hasGit, hasGh, hasKubectl, success: false })
+      : this.buildHostActionHeader({ hasGit, hasGh, hasKubectl, success: true });
+    const lines = outcomes.map((outcome) => `- \`${outcome.command}\`: ${outcome.summary}`);
+    return {
+      text: [header, ...lines].join("\n"),
+      hadFailure,
+    };
+  }
+
+  private async executeHostGitAction(
+    managed: ManagedSession,
+    action: HostAction,
+  ): Promise<{ command: string; summary: string; ok: boolean }> {
+    try {
+      const args = this.validateHostGitArgs(Array.isArray(action.args) ? action.args : []);
+      const command = `git ${args.join(" ")}`;
+      const { stdout, stderr } = await this.runHostGitCommand(managed.worktreePath, args);
+      return {
+        command,
+        summary: this.summarizeHostGitOutput(args[0]!, stdout, stderr, true),
+        ok: true,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const rawArgs = Array.isArray(action.args) ? action.args.filter((arg): arg is string => typeof arg === "string") : [];
+      return {
+        command: `git ${rawArgs.join(" ")}`.trim() || "git",
+        summary: this.summarizeHostGitOutput(rawArgs[0] ?? "git", "", message, false),
+        ok: false,
+      };
+    }
+  }
+
+  private async executeHostGhAction(
+    managed: ManagedSession,
+    action: HostAction,
+  ): Promise<{ command: string; summary: string; ok: boolean }> {
+    try {
+      const args = this.validateHostGhArgs(Array.isArray(action.args) ? action.args : []);
+      const command = `gh ${args.join(" ")}`;
+      const { stdout, stderr } = await this.runHostGhCommand(managed.worktreePath, args);
+      return {
+        command,
+        summary: this.summarizeHostGhOutput(args, stdout, stderr, true),
+        ok: true,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const rawArgs = Array.isArray(action.args) ? action.args.filter((arg): arg is string => typeof arg === "string") : [];
+      return {
+        command: `gh ${rawArgs.join(" ")}`.trim() || "gh",
+        summary: this.summarizeHostGhOutput(rawArgs, "", message, false),
+        ok: false,
+      };
+    }
+  }
+
+  private async executeHostKubectlAction(
+    managed: ManagedSession,
+    action: HostAction,
+  ): Promise<{ command: string; summary: string; ok: boolean }> {
+    try {
+      const args = this.validateHostKubectlArgs(Array.isArray(action.args) ? action.args : []);
+      const command = `kubectl ${args.join(" ")}`;
+      const { stdout, stderr } = await this.runHostKubectlCommand(managed.worktreePath, args);
+      return {
+        command,
+        summary: this.summarizeHostKubectlOutput(args, stdout, stderr, true),
+        ok: true,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const rawArgs = Array.isArray(action.args) ? action.args.filter((arg): arg is string => typeof arg === "string") : [];
+      return {
+        command: `kubectl ${rawArgs.join(" ")}`.trim() || "kubectl",
+        summary: this.summarizeHostKubectlOutput(rawArgs, "", message, false),
+        ok: false,
+      };
+    }
+  }
+
+  private validateHostGitArgs(args: string[]): string[] {
+    const normalized = args
+      .filter((arg): arg is string => typeof arg === "string")
+      .map((arg) => arg.trim())
+      .filter(Boolean);
+
+    if (normalized.length === 0) {
+      throw new Error("host git action is missing args");
+    }
+
+    const subcommand = normalized[0];
+    if (!subcommand || subcommand.startsWith("-") || !ALLOWED_HOST_GIT_SUBCOMMANDS.has(subcommand)) {
+      throw new Error(`host git action "${subcommand ?? ""}" is not allowed`);
+    }
+
+    const hasDisallowedFlag = normalized.slice(1).some((arg) =>
+      DISALLOWED_HOST_GIT_FLAGS.includes(arg) || /^--force(?:=.*)?$/i.test(arg),
+    );
+    if (hasDisallowedFlag) {
+      throw new Error("host git action includes a disallowed flag");
+    }
+
+    return normalized;
+  }
+
+  private validateHostGhArgs(args: string[]): string[] {
+    const normalized = args
+      .filter((arg): arg is string => typeof arg === "string")
+      .map((arg) => arg.trim())
+      .filter(Boolean);
+
+    if (normalized.length < 2) {
+      throw new Error("host gh action is missing args");
+    }
+
+    const [topLevel, subcommand] = normalized;
+    if (!topLevel || !ALLOWED_HOST_GH_TOP_LEVEL.has(topLevel)) {
+      throw new Error(`host gh action "${topLevel ?? ""}" is not allowed`);
+    }
+    if (!subcommand || !ALLOWED_HOST_GH_RUN_SUBCOMMANDS.has(subcommand)) {
+      throw new Error(`host gh run action "${subcommand ?? ""}" is not allowed`);
+    }
+
+    const hasDisallowedFlag = normalized.slice(2).some((arg) =>
+      DISALLOWED_HOST_GH_FLAGS.includes(arg),
+    );
+    if (hasDisallowedFlag) {
+      throw new Error("host gh action includes a disallowed flag");
+    }
+
+    return normalized;
+  }
+
+  private validateHostKubectlArgs(args: string[]): string[] {
+    const normalized = args
+      .filter((arg): arg is string => typeof arg === "string")
+      .map((arg) => arg.trim())
+      .filter(Boolean);
+
+    if (normalized.length === 0) {
+      throw new Error("host kubectl action is missing args");
+    }
+
+    let index = 0;
+    while (index < normalized.length && normalized[index]!.startsWith("-")) {
+      const flag = normalized[index]!;
+      if (!ALLOWED_HOST_KUBECTL_GLOBAL_FLAGS.has(flag)) {
+        throw new Error(`host kubectl flag "${flag}" is not allowed`);
+      }
+      index += HOST_KUBECTL_FLAGS_WITH_VALUE.has(flag) ? 2 : 1;
+    }
+
+    const subcommand = normalized[index];
+    if (!subcommand || !ALLOWED_HOST_KUBECTL_SUBCOMMANDS.has(subcommand)) {
+      throw new Error(`host kubectl action "${subcommand ?? ""}" is not allowed`);
+    }
+
+    const hasDisallowedFlag = normalized.some((arg) => DISALLOWED_HOST_KUBECTL_FLAGS.has(arg));
+    if (hasDisallowedFlag) {
+      throw new Error("host kubectl action includes a disallowed flag");
+    }
+
+    for (let cursor = index + 1; cursor < normalized.length; cursor += 1) {
+      const token = normalized[cursor]!;
+      if (!token.startsWith("-")) {
+        continue;
+      }
+      if (!ALLOWED_HOST_KUBECTL_FLAGS.has(token)) {
+        throw new Error(`host kubectl flag "${token}" is not allowed`);
+      }
+      if (HOST_KUBECTL_FLAGS_WITH_VALUE.has(token)) {
+        cursor += 1;
+      }
+    }
+
+    switch (subcommand) {
+      case "config":
+        if (normalized[index + 1] !== "current-context") {
+          throw new Error("host kubectl config action is limited to current-context");
+        }
+        break;
+      case "get":
+      case "describe":
+      case "logs":
+        if (!normalized.slice(index + 1).some((token) => !token.startsWith("-"))) {
+          throw new Error(`host kubectl ${subcommand} action is missing a target`);
+        }
+        break;
+      case "rollout":
+        if (normalized[index + 1] !== "status") {
+          throw new Error('host kubectl rollout action is limited to "status"');
+        }
+        if (!normalized.slice(index + 2).some((token) => !token.startsWith("-"))) {
+          throw new Error("host kubectl rollout status action is missing a target");
+        }
+        break;
+      default:
+        throw new Error(`host kubectl action "${subcommand}" is not allowed`);
+    }
+
+    return normalized;
+  }
+
+  private runHostGitCommand(
+    cwd: string,
+    args: string[],
+  ): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      execFile(
+        "git",
+        args,
+        {
+          cwd,
+          env: process.env,
+          timeout: HOST_GIT_TIMEOUT_MS,
+          maxBuffer: HOST_GIT_MAX_BUFFER,
+        },
+        (error, stdout, stderr) => {
+          if (error) {
+            const summary = [stderr, stdout, error.message]
+              .map((value) => value?.trim())
+              .find(Boolean) ?? "git command failed";
+            reject(new Error(summary));
+            return;
+          }
+          resolve({ stdout, stderr });
+        },
+      );
+    });
+  }
+
+  private runHostGhCommand(
+    cwd: string,
+    args: string[],
+  ): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      execFile(
+        "gh",
+        args,
+        {
+          cwd,
+          env: process.env,
+          timeout: HOST_GH_TIMEOUT_MS,
+          maxBuffer: HOST_GH_MAX_BUFFER,
+        },
+        (error, stdout, stderr) => {
+          if (error) {
+            const summary = [stderr, stdout, error.message]
+              .map((value) => value?.trim())
+              .find(Boolean) ?? "gh command failed";
+            reject(new Error(summary));
+            return;
+          }
+          resolve({ stdout, stderr });
+        },
+      );
+    });
+  }
+
+  private runHostKubectlCommand(
+    cwd: string,
+    args: string[],
+  ): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      execFile(
+        "kubectl",
+        args,
+        {
+          cwd,
+          env: process.env,
+          timeout: HOST_KUBECTL_TIMEOUT_MS,
+          maxBuffer: HOST_KUBECTL_MAX_BUFFER,
+        },
+        (error, stdout, stderr) => {
+          if (error) {
+            const summary = [stderr, stdout, error.message]
+              .map((value) => value?.trim())
+              .find(Boolean) ?? "kubectl command failed";
+            reject(new Error(summary));
+            return;
+          }
+          resolve({ stdout, stderr });
+        },
+      );
+    });
+  }
+
+  private summarizeHostGitOutput(
+    subcommand: string,
+    stdout: string,
+    stderr: string,
+    ok: boolean,
+  ): string {
+    const firstLine = [stdout, stderr]
+      .flatMap((value) => value.split("\n"))
+      .map((line) => line.trim())
+      .find(Boolean);
+
+    if (!ok) {
+      return firstLine ? `failed: ${firstLine}` : "failed";
+    }
+
+    switch (subcommand) {
+      case "add":
+        return firstLine ?? "staged successfully";
+      case "commit":
+        return firstLine ?? "commit created";
+      case "push":
+        return firstLine ?? "push completed";
+      default:
+        return firstLine ?? "completed successfully";
+    }
+  }
+
+  private summarizeHostGhOutput(
+    args: string[],
+    stdout: string,
+    stderr: string,
+    ok: boolean,
+  ): string {
+    const firstLine = [stdout, stderr]
+      .flatMap((value) => value.split("\n"))
+      .map((line) => line.trim())
+      .find(Boolean);
+
+    if (!ok) {
+      return firstLine ? `failed: ${firstLine}` : "failed";
+    }
+
+    if (args[0] === "run" && args[1] === "list") {
+      return firstLine ?? "hosted runs listed";
+    }
+
+    if (args[0] === "run" && args[1] === "view") {
+      const jsonText = stdout.trim();
+      if (jsonText.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(jsonText) as { status?: string; conclusion?: string; url?: string };
+          const summary = [parsed.status, parsed.conclusion, parsed.url].filter(Boolean);
+          if (summary.length > 0) {
+            return summary.join(" · ");
+          }
+        } catch {
+          // fall back to first line
+        }
+      }
+      return firstLine ?? "hosted run details loaded";
+    }
+
+    return firstLine ?? "completed successfully";
+  }
+
+  private summarizeHostKubectlOutput(
+    args: string[],
+    stdout: string,
+    stderr: string,
+    ok: boolean,
+  ): string {
+    const lines = [stdout, stderr]
+      .flatMap((value) => value.split("\n"))
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const preview = lines.slice(0, 3).join(" | ");
+
+    if (!ok) {
+      return preview ? `failed: ${preview}` : "failed";
+    }
+
+    const normalized = args.filter(Boolean);
+    const subcommand = normalized.find((arg) => !arg.startsWith("-")) ?? "kubectl";
+    if (subcommand === "logs") {
+      return preview || "recent logs loaded";
+    }
+    if (subcommand === "rollout") {
+      return preview || "rollout status loaded";
+    }
+    if (subcommand === "config") {
+      return preview || "current context loaded";
+    }
+    return preview || "completed successfully";
+  }
+
+  private buildHostActionHeader({
+    hasGit,
+    hasGh,
+    hasKubectl,
+    success,
+  }: {
+    hasGit: boolean;
+    hasGh: boolean;
+    hasKubectl: boolean;
+    success: boolean;
+  }): string {
+    const verb = success ? "ran" : "attempted";
+    if (hasGit && hasGh && hasKubectl) {
+      return `Roscoe ${verb} host-side Git, GitHub CLI, and Kubernetes debug steps to cross local runtime boundaries the lane could not complete natively.`;
+    }
+    if (hasGit && hasGh) {
+      return `Roscoe ${verb} host-side Git and GitHub CLI steps to cross local runtime boundaries the lane could not complete natively.`;
+    }
+    if (hasGit && hasKubectl) {
+      return `Roscoe ${verb} host-side Git and Kubernetes debug steps to cross local runtime boundaries the lane could not complete natively.`;
+    }
+    if (hasGh && hasKubectl) {
+      return `Roscoe ${verb} host-side GitHub CLI and Kubernetes debug checks against the deployed environment.`;
+    }
+    if (hasKubectl) {
+      return `Roscoe ${verb} host-side Kubernetes debug checks against the deployed environment.`;
+    }
+    if (hasGh) {
+      return `Roscoe ${verb} host-side GitHub CLI checks to verify hosted CI from the local machine.`;
+    }
+    return `Roscoe ${verb} host-side Git to cross the shared worktree/.git boundary.`;
   }
 }
 

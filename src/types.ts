@@ -246,7 +246,7 @@ export type AppAction =
   | { type: "START_GENERATING"; id: string }
   | { type: "SUGGESTION_READY"; id: string; result: SuggestionResult }
   | { type: "SUGGESTION_ERROR"; id: string; message: string }
-  | { type: "APPROVE_SUGGESTION"; id: string }
+  | { type: "APPROVE_SUGGESTION"; id: string; text?: string }
   | { type: "START_EDIT"; id: string }
   | { type: "REJECT_SUGGESTION"; id: string }
   | { type: "START_MANUAL"; id: string }

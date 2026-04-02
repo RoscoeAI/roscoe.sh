@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   compactRedundantParkedConversation,
+  getLastConversationEntry,
   getInterruptedExitRecoveryPlan,
   getRestoreRecoveryPlan,
   getRestoredSuggestionPhase,
@@ -11,6 +12,7 @@ import {
   isParkedAcknowledgementText,
   isParkedDecisionText,
   isPauseAcknowledgementText,
+  normalizeRestoredTimeline,
   sortTranscriptEntries,
 } from "./session-transcript.js";
 
@@ -244,6 +246,24 @@ describe("additional transcript helpers", () => {
     expect(inferAwaitingInput([
       { id: "remote", kind: "remote-turn", timestamp: 4, provider: "codex", text: "Need a response." },
     ] as any, "bash")).toBe(false);
+    expect(inferAwaitingInput([
+      { id: "remote", kind: "remote-turn", timestamp: 5, provider: "codex", text: "Need a response." },
+      { id: "dismissed", kind: "local-suggestion", timestamp: 6, text: "", confidence: 20, reasoning: "hold silently", state: "dismissed" },
+    ] as any, null)).toBe(true);
+  });
+
+  it("ignores dismissed local suggestions when finding the last live conversation entry", () => {
+    expect(getLastConversationEntry([
+      { id: "remote", kind: "remote-turn", timestamp: 1, provider: "codex", text: "Need a response." },
+      { id: "dismissed", kind: "local-suggestion", timestamp: 2, text: "", confidence: 20, reasoning: "hold silently", state: "dismissed" },
+      { id: "tool", kind: "tool-activity", timestamp: 3, provider: "roscoe", toolName: "contract", text: "Saved project contract changed." },
+    ] as any)).toEqual({
+      id: "remote",
+      kind: "remote-turn",
+      timestamp: 1,
+      provider: "codex",
+      text: "Need a response.",
+    });
   });
 
   it("builds restore recovery plans for both restage and resume flows", () => {
@@ -321,5 +341,71 @@ describe("additional transcript helpers", () => {
     expect(getRestoredSuggestionPhase([
       { id: "dismissed", kind: "local-suggestion", timestamp: 1, text: "Dismissed", confidence: 40, reasoning: "nope", state: "dismissed" },
     ] as any)).toEqual({ kind: "idle" });
+
+    expect(getRestoredSuggestionPhase([
+      {
+        id: "noop-pending",
+        kind: "local-suggestion",
+        timestamp: 2,
+        text: "",
+        confidence: 20,
+        reasoning: "Fourth consecutive no-activity delta; the NEXT.md triage direction was already sent clearly, Guild has not responded, and repeated CI polls are not producing new information — Roscoe should hold silently until a Guild turn or CI completion surfaces.",
+        state: "pending",
+      },
+    ] as any)).toEqual({ kind: "idle" });
+
+    expect(getRestoredSuggestionPhase([
+      {
+        id: "legacy-fallback",
+        kind: "local-suggestion",
+        timestamp: 3,
+        text: "No response requested.",
+        confidence: 50,
+        reasoning: "Could not parse structured response — defaulting to medium confidence",
+        state: "pending",
+      },
+    ] as any)).toEqual({ kind: "idle" });
+  });
+
+  it("dismisses suppressed legacy pending suggestions when normalizing restored timelines", () => {
+    expect(normalizeRestoredTimeline([
+      {
+        id: "legacy-fallback",
+        kind: "local-suggestion",
+        timestamp: 3,
+        text: "No response requested.",
+        confidence: 50,
+        reasoning: "Could not parse structured response — defaulting to medium confidence",
+        state: "pending",
+      },
+      {
+        id: "real-review",
+        kind: "local-suggestion",
+        timestamp: 4,
+        text: "Review this before sending.",
+        confidence: 61,
+        reasoning: "Still needs clarification.",
+        state: "pending",
+      },
+    ] as any)).toEqual([
+      {
+        id: "legacy-fallback",
+        kind: "local-suggestion",
+        timestamp: 3,
+        text: "No response requested.",
+        confidence: 50,
+        reasoning: "Could not parse structured response — defaulting to medium confidence",
+        state: "dismissed",
+      },
+      {
+        id: "real-review",
+        kind: "local-suggestion",
+        timestamp: 4,
+        text: "Review this before sending.",
+        confidence: 61,
+        reasoning: "Still needs clarification.",
+        state: "pending",
+      },
+    ]);
   });
 });

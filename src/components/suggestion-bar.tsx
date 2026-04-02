@@ -207,7 +207,7 @@ export function SuggestionBar({
                   </Text>
                   {blockedByPermissions && (
                     <Text dimColor>
-                      This blocker is coming from the Guild lane running in safe mode. Use <Text color="cyan">u</Text> to switch Guild execution to accelerated, or run the command in another terminal.
+                      This blocker is coming from the Guild lane running in safe mode. Roscoe can now carry approved local Git staging, commit, and push steps for shared worktree metadata blockers; use <Text color="cyan">u</Text> to switch Guild execution to accelerated when the blocker is broader than Git.
                     </Text>
                   )}
                 </Box>

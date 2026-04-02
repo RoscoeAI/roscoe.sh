@@ -215,11 +215,10 @@ export function getWorkerProfileForProject(
   const protocol = detectProtocol(baseProfile);
   const safeDefault = getDefaultWorkerRuntime(protocol);
   const projectDefault = getProjectWorkerRuntime(context, protocol);
-  const executionRuntime = overrides?.executionMode === "accelerated"
-    ? getAcceleratedWorkerRuntime(protocol)
-    : projectDefault?.executionMode === "accelerated"
-      ? getAcceleratedWorkerRuntime(protocol)
-      : safeDefault;
+  const explicitExecutionMode = overrides?.executionMode ?? projectDefault?.executionMode ?? null;
+  const executionRuntime = explicitExecutionMode === "safe"
+    ? safeDefault
+    : getAcceleratedWorkerRuntime(protocol);
 
   return applyRuntimeSettings(
     baseProfile,

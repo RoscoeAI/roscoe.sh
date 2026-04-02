@@ -22,6 +22,7 @@ vi.mock("fs", () => ({
 import { ResponseGenerator } from "./response-generator.js";
 import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import * as config from "./config.js";
+import { MALFORMED_STRUCTURED_DRAFT_REASONING } from "./roscoe-draft.js";
 
 function createMockProc() {
   const stdout = new PassThrough();
@@ -130,6 +131,71 @@ class ExitOnlyResponderMonitor extends EventEmitter {
   });
   setProfile = vi.fn();
   kill = vi.fn();
+}
+
+class RetryableResponderMonitor extends EventEmitter {
+  private sessionId: string | null;
+
+  constructor(sessionId: string | null = "stale-responder-session") {
+    super();
+    this.sessionId = sessionId;
+  }
+
+  startTurn = vi.fn((prompt: string) => {
+    this.sessionId = "fresh-responder-session";
+    setImmediate(() => {
+      this.emit("text", '{"message":"reseeded","confidence":86,"reasoning":"fresh hidden thread"}');
+      this.emit("turn-complete");
+      this.emit("exit", 0);
+    });
+    return prompt;
+  });
+
+  sendFollowUp = vi.fn((prompt: string) => {
+    setImmediate(() => {
+      this.emit("exit", 1);
+    });
+    return prompt;
+  });
+
+  getSessionId = vi.fn(() => this.sessionId);
+  restoreSessionId = vi.fn((sessionId: string | null) => {
+    this.sessionId = sessionId;
+  });
+  setProfile = vi.fn();
+  kill = vi.fn();
+}
+
+class TimeoutThenReseedResponderMonitor extends EventEmitter {
+  private sessionId: string | null;
+
+  constructor(sessionId: string | null = "timed-out-responder-session") {
+    super();
+    this.sessionId = sessionId;
+  }
+
+  startTurn = vi.fn((prompt: string) => {
+    this.sessionId = "reseeded-after-timeout";
+    setImmediate(() => {
+      this.emit("text", '{"message":"reseeded after timeout","confidence":83,"reasoning":"fresh hidden thread after timeout"}');
+      this.emit("turn-complete");
+      this.emit("exit", 0);
+    });
+    return prompt;
+  });
+
+  sendFollowUp = vi.fn((prompt: string) => prompt);
+
+  getSessionId = vi.fn(() => this.sessionId);
+  restoreSessionId = vi.fn((sessionId: string | null) => {
+    this.sessionId = sessionId;
+  });
+  setProfile = vi.fn();
+  kill = vi.fn(() => {
+    setImmediate(() => {
+      this.emit("exit", 1);
+    });
+  });
 }
 
 /** Write a stream-json text_delta line to the proc's stdout */
@@ -265,6 +331,7 @@ describe("ResponseGenerator", () => {
           workerGovernanceMode: "roscoe-arbiter",
           verificationCadence: "batched",
           responderApprovalMode: "manual",
+          tokenEfficiencyMode: "balanced",
         },
         intentBrief: {
           projectStory: "Give operators a clean workflow",
@@ -306,6 +373,58 @@ describe("ResponseGenerator", () => {
       expect(ctx).toContain("Guild governance mode");
       expect(ctx).toContain("Verification cadence");
       expect(ctx).toContain("Roscoe approval default");
+    });
+
+    it("uses a compact contract digest in save-tokens mode", async () => {
+      gen.setProjectContext({
+        name: "MyProject",
+        directory: "/tmp",
+        goals: ["ship it", "tighten hosted proof", "reduce regressions"],
+        milestones: ["v1.0", "stage", "prod"],
+        techStack: ["TypeScript", "React", "Vitest", "Playwright", "Prisma"],
+        notes: "important note that should be clipped if it gets too long important note that should be clipped if it gets too long important note that should be clipped if it gets too long",
+        runtimeDefaults: {
+          tokenEfficiencyMode: "save-tokens",
+        },
+        intentBrief: {
+          projectStory: "Give operators a clean workflow without drifting into irrelevant proof chatter",
+          primaryUsers: ["operators"],
+          definitionOfDone: ["main flow is stable", "hosted proof is truthful", "tests prove the slice"],
+          acceptanceChecks: ["demo path completes", "preview stays truthful", "hosted CI is green"],
+          successSignals: ["operators can finish the task"],
+          acceptanceLedger: [
+            { label: "Preview runner proves health", status: "open", evidence: [], notes: "" },
+            { label: "Webhook slice proves hosted flow", status: "proven", evidence: [], notes: "" },
+          ],
+          deliveryPillars: {
+            frontend: ["Frontend operator flow renders and completes correctly"],
+            backend: ["Backend workflow APIs persist and validate correctly"],
+            unitComponentTests: ["Vitest unit/component tests cover changed logic, regressions, and edge cases at a reasonable level"],
+            e2eTests: ["Playwright e2e tests cover success and failure paths at the right stage of hardening"],
+          },
+          coverageMechanism: ["Vitest plus Playwright runs provide the canonical validation path"],
+          nonGoals: ["rewriting the stack", "adding a new provider"],
+          constraints: ["keep the keyboard-first UX"],
+          architecturePrinciples: ["Reuse shared operator modules"],
+          autonomyRules: ["ask before broad scope changes"],
+          qualityBar: ["Do not call this done until proof is real"],
+          riskBoundaries: ["do not change billing"],
+          uiDirection: "bold but legible",
+        },
+        interviewAnswers: [
+          { question: "Who is it for?", answer: "Operators", theme: "users" },
+          { question: "What matters most?", answer: "Hosted proof", theme: "quality" },
+          { question: "What should Roscoe avoid?", answer: "Scope drift", theme: "non-goals" },
+          { question: "Should Roscoe restate everything?", answer: "No, keep it tight", theme: "efficiency" },
+        ],
+      });
+
+      const ctx = await gen.buildContext("A\n".repeat(100), "claude");
+      expect(ctx).toContain("=== Roscoe Contract Digest ===");
+      expect(ctx).toContain("Open ledger (1, 1 proven): Preview runner proves health");
+      expect(ctx).toContain("Token efficiency: save tokens");
+      expect(ctx).toContain("[Roscoe compacted older lane context for token efficiency.]");
+      expect(ctx).not.toContain("=== Roscoe Intent Brief ===");
     });
 
     it("includes worktree info from session", async () => {
@@ -733,6 +852,7 @@ describe("ResponseGenerator", () => {
       completeWithText(proc, json);
 
       const result = await promise;
+      expect(result.decision).toBe("message");
       expect(result.text).toBe("do this");
       expect(result.confidence).toBe(85);
       expect(result.reasoning).toBe("clear next step");
@@ -747,6 +867,7 @@ describe("ResponseGenerator", () => {
       completeWithText(proc, json);
 
       const result = await promise;
+      expect(result.decision).toBe("needs-review");
       expect(result.text).toBe("");
       expect(result.confidence).toBe(99);
       expect(result.reasoning).toBe("Wait here");
@@ -762,6 +883,7 @@ describe("ResponseGenerator", () => {
       completeWithText(proc, json);
 
       const result = await promise;
+      expect(result.decision).toBe("needs-review");
       expect(result.text).toBe("");
       expect(result.confidence).toBe(50);
       expect(result.reasoning).toBe("");
@@ -776,9 +898,25 @@ describe("ResponseGenerator", () => {
       completeWithText(proc, wrapped);
 
       const result = await promise;
+      expect(result.decision).toBe("needs-review");
       expect(result.text).toBe("");
       expect(result.confidence).toBe(91);
       expect(result.reasoning).toBe("Hold for now");
+    });
+
+    it("suppresses malformed structured draft JSON instead of surfacing the raw payload", async () => {
+      const proc = createMockProc();
+      mockSpawn.mockReturnValue(proc);
+
+      const malformed = "```json\n{\"decision\":\"noop\",\"message\":\"\",\"reasoning\":\"hold silently until CI completes\"\n```";
+      const promise = gen.generateSuggestion("context", "claude");
+      completeWithText(proc, malformed);
+
+      const result = await promise;
+      expect(result.decision).toBe("noop");
+      expect(result.text).toBe("");
+      expect(result.confidence).toBe(20);
+      expect(result.reasoning).toBe(MALFORMED_STRUCTURED_DRAFT_REASONING);
     });
 
     it("emits responder trace metadata with command preview and tuning rationale", async () => {
@@ -1044,6 +1182,360 @@ describe("ResponseGenerator", () => {
       expect(result.reasoning).toBe("The milestone is complete.");
     });
 
+    it("promotes explicit acceptance ledger items from strong transcript proof and persists them", async () => {
+      const proc = createMockProc();
+      mockSpawn.mockReturnValue(proc);
+      const saveSpy = vi.spyOn(config, "saveProjectContext").mockImplementation(() => undefined);
+
+      gen.setProjectContext({
+        name: "K12.io",
+        directory: "/tmp/k12io",
+        goals: ["Close the acceptance ledger"],
+        milestones: ["Green CI and Stripe proof"],
+        techStack: ["TypeScript"],
+        notes: "",
+        runtimeDefaults: {},
+        intentBrief: {
+          projectStory: "Close the current ledger honestly.",
+          primaryUsers: ["operators"],
+          definitionOfDone: ["The ledger is actually closed"],
+          acceptanceChecks: ["CI and Stripe proof are grounded in the transcript"],
+          successSignals: ["Roscoe stops fighting stale metadata"],
+          acceptanceLedgerMode: "explicit",
+          acceptanceLedger: [
+            { label: "CI: test suite and build baseline repaired", status: "open", evidence: ["pnpm test passes"], notes: "" },
+            { label: "CI: quality gates re-enabled in test pipeline", status: "open", evidence: ["deploy-k3-test.yml gates uncommented and passing on push"], notes: "" },
+            { label: "Stripe: one-time purchase e2e with failure paths", status: "open", evidence: ["pnpm e2e:stripe passes"], notes: "" },
+            { label: "Stripe: integration tests with real signatures", status: "open", evidence: ["pnpm test:integration passes"], notes: "" },
+          ],
+          deliveryPillars: {
+            frontend: [],
+            backend: [],
+            unitComponentTests: [],
+            e2eTests: [],
+          },
+          coverageMechanism: [],
+          nonGoals: [],
+          constraints: [],
+          architecturePrinciples: [],
+          autonomyRules: [],
+          qualityBar: [],
+          riskBoundaries: [],
+          uiDirection: "",
+        },
+        interviewAnswers: [],
+      });
+
+      const json = JSON.stringify({
+        message: "This lane is parked.",
+        confidence: 95,
+        reasoning: "The acceptance ledger is closed.",
+      });
+      const promise = gen.generateSuggestion(
+        [
+          "All 3 acceptance ledger items are done and validated. Here's the proof:",
+          "| Ledger Item | CI Run | Result |",
+          "| CI: test suite and build baseline repaired | 23842731990 | 2374 unit tests pass, Nitro build green |",
+          "| CI: quality gates re-enabled in test pipeline | same | TypeCheck + Lint + Tests + Build all green |",
+          "| Stripe: one-time purchase e2e with failure paths | same | 7 new tests, 92/100 E2E, 0 failures |",
+          "The ledger is closed. No items remain open.",
+        ].join("\n"),
+        "claude",
+      );
+      completeWithText(proc, json);
+
+      const result = await promise;
+
+      expect(result.text).toBe("This lane is parked.");
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+      const saved = saveSpy.mock.calls[0]?.[0] as config.ProjectContext;
+      expect(saved.intentBrief.acceptanceLedger?.slice(0, 3).map((item) => item.status)).toEqual(["proven", "proven", "proven"]);
+      expect(saved.intentBrief.acceptanceLedger?.[3]?.status).toBe("open");
+      expect(saved.intentBrief.acceptanceLedger?.[0]?.evidence.some((entry) => entry.includes("Transcript proof:"))).toBe(true);
+    });
+
+    it("promotes hosted outcome summary closures when a nearby green run proves them", async () => {
+      const proc = createMockProc();
+      mockSpawn.mockReturnValue(proc);
+      const saveSpy = vi.spyOn(config, "saveProjectContext").mockImplementation(() => undefined);
+
+      gen.setProjectContext({
+        name: "K12.io",
+        directory: "/tmp/k12io",
+        goals: ["Close the acceptance ledger"],
+        milestones: ["Hosted RosterStream proof is green"],
+        techStack: ["TypeScript"],
+        notes: "",
+        runtimeDefaults: {},
+        intentBrief: {
+          projectStory: "Close the current ledger honestly.",
+          primaryUsers: ["operators"],
+          definitionOfDone: ["The ledger is actually closed"],
+          acceptanceChecks: ["Hosted runs close the roster proof items"],
+          successSignals: ["Roscoe stops fighting stale metadata"],
+          acceptanceLedgerMode: "explicit",
+          acceptanceLedger: [
+            { label: "RosterStream: Clever SSO proven (unit + e2e + integration)", status: "open", evidence: ["Unit tests with doc-derived fixtures pass"], notes: "" },
+            { label: "RosterStream: ClassLink SSO proven (unit + e2e + integration)", status: "open", evidence: ["Unit tests with doc-derived fixtures pass"], notes: "" },
+            { label: "RosterStream: all 3 providers through onboarding wizard", status: "open", evidence: ["E2e proves wizard routes to each provider"], notes: "" },
+            { label: "NEXT.md: AI generation bug triage complete", status: "open", evidence: ["7 issues classified with rationale"], notes: "" },
+          ],
+          deliveryPillars: { frontend: [], backend: [], unitComponentTests: [], e2eTests: [] },
+          coverageMechanism: [],
+          nonGoals: [],
+          constraints: [],
+          architecturePrinciples: [],
+          autonomyRules: [],
+          qualityBar: [],
+          riskBoundaries: [],
+          uiDirection: "",
+        },
+        interviewAnswers: [],
+      });
+
+      const promise = gen.generateSuggestion(
+        [
+          "Hosted outcome:",
+          "- [Run 23875230249](https://github.com/K12io/k12io/actions/runs/23875230249) is green. That closes the RosterStream front we just pushed: Clever SSO, ClassLink SSO, and the onboarding-wizard entry proof for Google/Clever/ClassLink are all now hosted-green on a descendant commit.",
+          "What is closed now:",
+          "- RosterStream: Clever SSO proven",
+          "- RosterStream: ClassLink SSO proven",
+          "- RosterStream: all 3 providers through onboarding wizard",
+          "Next slice:",
+          "- Pull the next still-open ledger item outside this now-green set.",
+        ].join("\n"),
+        "claude",
+      );
+      completeWithText(proc, JSON.stringify({
+        message: "Continue with the next still-open ledger item.",
+        confidence: 91,
+        reasoning: "Hosted outcome is green and the current proof cluster is closed.",
+      }));
+
+      const result = await promise;
+
+      expect(result.text).toBe("Continue with the next still-open ledger item.");
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+      const saved = saveSpy.mock.calls[0]?.[0] as config.ProjectContext;
+      expect(saved.intentBrief.acceptanceLedger?.slice(0, 3).map((item) => item.status)).toEqual(["proven", "proven", "proven"]);
+      expect(saved.intentBrief.acceptanceLedger?.[3]?.status).toBe("open");
+      expect(saved.intentBrief.acceptanceLedger?.[0]?.evidence.some((entry) => entry.includes("23875230249"))).toBe(true);
+    });
+
+    it("rewrites stalled Guild review drafts into an automatic restart on the next open ledger item", async () => {
+      class StalledGuildResponderMonitor extends EventEmitter {
+        private sessionId: string | null = "stale-responder-thread";
+        startTurn = vi.fn();
+        sendFollowUp = vi.fn((prompt: string) => {
+          setImmediate(() => {
+            this.emit("text", JSON.stringify({
+              decision: "needs-review",
+              message: "The Codex Guild lane has been unresponsive through 6+ polling cycles since the NEXT.md triage directive. The remaining open ledger items are NEXT.md bug triage and coverage thresholds. The Codex session may need a manual restart or a fresh prompt to continue. Want me to resend the triage directive, or would you prefer to pick this up in a different lane?",
+              confidence: 75,
+              reasoning: "After 6+ consecutive empty deltas with no Guild response, this is likely a stalled Codex session that needs developer intervention rather than more Roscoe messages into the void.",
+            }));
+            this.emit("turn-complete");
+            this.emit("exit", 0);
+          });
+          return prompt;
+        });
+        getSessionId = vi.fn(() => this.sessionId);
+        restoreSessionId = vi.fn((sessionId: string | null) => {
+          this.sessionId = sessionId;
+        });
+        setProfile = vi.fn();
+        kill = vi.fn();
+      }
+
+      const projectCtx: config.ProjectContext = {
+        name: "K12.io",
+        directory: "/tmp/k12io",
+        goals: ["Close the acceptance ledger"],
+        milestones: ["Hosted RosterStream proof is green"],
+        techStack: ["TypeScript"],
+        notes: "",
+        runtimeDefaults: {},
+        intentBrief: {
+          projectStory: "Close the current ledger honestly.",
+          primaryUsers: ["operators"],
+          definitionOfDone: ["The ledger is actually closed"],
+          acceptanceChecks: ["Hosted runs close the roster proof items"],
+          successSignals: ["Roscoe keeps the lane moving"],
+          acceptanceLedgerMode: "explicit",
+          acceptanceLedger: [
+            { label: "RosterStream: Clever SSO proven (unit + e2e + integration)", status: "proven", evidence: [], notes: "" },
+            { label: "RosterStream: ClassLink SSO proven (unit + e2e + integration)", status: "proven", evidence: [], notes: "" },
+            { label: "RosterStream: all 3 providers through onboarding wizard", status: "proven", evidence: [], notes: "" },
+            { label: "NEXT.md: AI generation bug triage complete", status: "open", evidence: [], notes: "" },
+            { label: "Coverage thresholds met across all fronts", status: "open", evidence: [], notes: "" },
+          ],
+          deliveryPillars: { frontend: [], backend: [], unitComponentTests: [], e2eTests: [] },
+          coverageMechanism: [],
+          nonGoals: [],
+          constraints: [],
+          architecturePrinciples: [],
+          autonomyRules: [],
+          qualityBar: [],
+          riskBoundaries: [],
+          uiDirection: "",
+        },
+        interviewAnswers: [],
+      };
+      vi.spyOn(config, "loadProjectContext").mockReturnValue(projectCtx);
+      gen.setProjectContext(projectCtx);
+
+      const responderMonitor = new StalledGuildResponderMonitor();
+
+      const result = await gen.generateSuggestion(
+        "Hosted outcome says the last proof cluster is green.",
+        "claude",
+        {
+          profile: { name: "claude", command: "claude", args: [], protocol: "claude" },
+          profileName: "claude",
+          projectName: "K12.io",
+          projectDir: "/tmp/k12io",
+          worktreePath: "/tmp/k12io",
+          worktreeName: "feature-roscoe",
+          responderMonitor: responderMonitor as any,
+          responderHistory: [
+            { role: "assistant", content: "Hosted outcome: Clever, ClassLink, onboarding wizard, and free install are green. Next slice is the next still-open ledger item.", timestamp: 1 },
+          ],
+          responderHistoryCursor: 1,
+        },
+      );
+
+      expect(result.decision).toBe("restart-worker");
+      expect(result.text).toContain("NEXT.md: AI generation bug triage complete");
+      expect(result.text).toContain("Restart from the next still-open ledger item");
+      expect(result.reasoning).toContain("Guild stall self-heal");
+    });
+
+    it("strengthens deferential drafts into direct Roscoe guidance when the brief already resolves the trade-off", async () => {
+      const proc = createMockProc();
+      mockSpawn.mockReturnValue(proc);
+      gen.setProjectContext({
+        name: "K12.io",
+        directory: "/tmp/k12io",
+        goals: ["Close the acceptance ledger honestly"],
+        milestones: ["Coverage call"],
+        techStack: ["TypeScript"],
+        notes: "",
+        runtimeDefaults: {
+          workerGovernanceMode: "roscoe-arbiter",
+        },
+        intentBrief: {
+          projectStory: "Close the current hardening ledger without drifting into AI-pipeline rewrites.",
+          primaryUsers: ["operators"],
+          definitionOfDone: ["The current ledger is closed without mock-fidelity theater."],
+          acceptanceChecks: ["Coverage decisions stay anchored to the brief and real risk."],
+          successSignals: ["Roscoe chooses the stronger path directly."],
+          deliveryPillars: { frontend: [], backend: [], unitComponentTests: [], e2eTests: [] },
+          coverageMechanism: ["Coverage thresholds matter, but the brief says not to refactor the AI pipeline for theater."],
+          nonGoals: ["Do not refactor the AI pipeline just to satisfy coverage optics."],
+          constraints: [],
+          architecturePrinciples: [],
+          autonomyRules: [],
+          qualityBar: [],
+          riskBoundaries: [],
+          uiDirection: "",
+        },
+        interviewAnswers: [],
+      });
+
+      const promise = gen.generateSuggestion("coverage context", "claude");
+      completeWithText(proc, JSON.stringify({
+        message: "Recommendation: commit the webhook fix + tests, accept the current coverage floor as the honest bar for this sprint, and close the coverage ledger item with a documented rationale.\n\nThe alternative is writing ~200 lines of heavily-mocked AI pipeline tests that don't reduce real risk. Your call on whether to accept the floor or push further.",
+        confidence: 80,
+        reasoning: "The remaining coverage gap is concentrated in AI pipeline code the brief explicitly says not to refactor, so pushing for 75% there risks the mock-fidelity trap.",
+      }));
+
+      const result = await promise;
+
+      expect(result.decision).toBe("message");
+      expect(result.text).toContain("Proceed with this:");
+      expect(result.text).toContain("accept the current coverage floor");
+      expect(result.text).not.toContain("Your call");
+      expect(result.reasoning).toContain("Roscoe arbiter conviction");
+      expect(result.confidence).toBeGreaterThanOrEqual(84);
+    });
+
+    it("keeps deferential review drafts intact when an explicit approval boundary is in play", async () => {
+      const proc = createMockProc();
+      mockSpawn.mockReturnValue(proc);
+      gen.setProjectContext({
+        name: "Prod App",
+        directory: "/tmp/prod",
+        goals: ["Ship safely"],
+        milestones: ["Production rollout"],
+        techStack: ["TypeScript"],
+        notes: "",
+        runtimeDefaults: {
+          workerGovernanceMode: "roscoe-arbiter",
+        },
+        intentBrief: {
+          projectStory: "Ship safely with explicit production approvals.",
+          primaryUsers: ["operators"],
+          definitionOfDone: ["Production rollout happens with deliberate approval."],
+          acceptanceChecks: ["No accidental prod push."],
+          successSignals: ["Approval boundaries stay explicit."],
+          deliveryPillars: { frontend: [], backend: [], unitComponentTests: [], e2eTests: [] },
+          coverageMechanism: [],
+          nonGoals: [],
+          constraints: [],
+          architecturePrinciples: [],
+          autonomyRules: [],
+          qualityBar: [],
+          riskBoundaries: ["Do not deploy to production without explicit approval."],
+          uiDirection: "",
+        },
+        interviewAnswers: [],
+      });
+
+      const promise = gen.generateSuggestion("prod deploy context", "claude");
+      completeWithText(proc, JSON.stringify({
+        decision: "needs-review",
+        message: "Recommendation: push to main and deploy to production. Your call.",
+        confidence: 62,
+        reasoning: "Production deploy crosses an approval boundary and still needs the developer's explicit go-ahead.",
+      }));
+
+      const result = await promise;
+
+      expect(result.decision).toBe("needs-review");
+      expect(result.text).toContain("Your call");
+      expect(result.reasoning).toContain("approval boundary");
+    });
+
+    it("forces contradiction-mode when the developer says the deployed environment is still broken after green closure signals", () => {
+      const corrected = (gen as any).applyDraftGuards(
+        {
+          text: "This lane is fully closed. Wait for the next slice.",
+          confidence: 96,
+          reasoning: "All CI jobs green and the hosted smoke passed.",
+        },
+        [
+          "Assistant: Final hosted result is green. The lane is fully closed.",
+          "User: it's still broken, same error on https://test.k12.io: Invalid authentication state. Please try signing in again.",
+          "User: can you read pod logs? dig deeper?",
+        ].join("\n"),
+        {
+          intentBrief: {
+            deploymentContract: {
+              summary: "test.k12.io must stay truthful while fixes land.",
+              artifactType: "web app",
+            },
+          },
+        },
+      );
+
+      expect(corrected.decision).toBe("message");
+      expect(corrected.text).toContain("Do not close or hold this lane.");
+      expect(corrected.text).toContain("Enter contradiction mode now");
+      expect(corrected.text).toContain("pod or server logs");
+      expect(corrected.reasoning).toContain("Developer-reported deployed failure outranks green CI");
+      expect(corrected.confidence).toBe(94);
+    });
+
     it("treats a non-resolving hosted proof target as a fake-green blocker for web deployments", async () => {
       const proc = createMockProc();
       mockSpawn.mockReturnValue(proc);
@@ -1175,6 +1667,44 @@ describe("ResponseGenerator", () => {
       expect(result.confidence).toBe(92);
     });
 
+    it("suppresses repeating the exact same continuation guard text", () => {
+      const repeated = "Continue. Milestone parking is off by default, and meaningful work remains: acceptance ledger still open: CI: test suite and build baseline repaired. Keep the next slice focused on the next concrete, finish-seeking step instead of deferring it to a future lane.";
+      const corrected = (gen as any).applyDraftGuards(
+        {
+          text: "This lane is parked.",
+          confidence: 95,
+          reasoning: "The milestone is complete.",
+        },
+        `User: ${repeated}`,
+        {
+          intentBrief: {
+            localRunContract: {
+              summary: "Local operator proof still matters.",
+              startCommand: "pnpm dev",
+              firstRoute: "http://localhost:3000",
+              prerequisites: [],
+              seedRequirements: [],
+              expectedBlockedStates: [],
+              operatorSteps: [],
+            },
+            acceptanceLedgerMode: "explicit",
+            acceptanceLedger: [
+              {
+                label: "CI: test suite and build baseline repaired",
+                status: "open",
+                evidence: [],
+                notes: "",
+              },
+            ],
+          },
+        },
+      );
+
+      expect(corrected.text).toBe("Hold. The same continuation guidance is already in the lane transcript; wait for a materially different Guild update or fresh proof before restating it.");
+      expect(corrected.reasoning).toContain("Repeated continuation guard suppressed");
+      expect(corrected.confidence).toBeLessThanOrEqual(68);
+    });
+
     it("rejects with clean error on non-zero exit", async () => {
       const proc = createMockProc();
       mockSpawn.mockReturnValue(proc);
@@ -1253,6 +1783,58 @@ describe("ResponseGenerator", () => {
       expect(result.orchestratorActions).toHaveLength(1);
     });
 
+    it("includes hostActions when present", async () => {
+      const proc = createMockProc();
+      mockSpawn.mockReturnValue(proc);
+
+      const json = JSON.stringify({
+        message: "Host git was needed.",
+        confidence: 83,
+        reasoning: "Safe mode blocked shared git metadata.",
+        hostActions: [{ type: "git", args: ["add", "package.json"], description: "stage the file" }],
+      });
+      const promise = gen.generateSuggestion("ctx", "claude");
+      completeWithText(proc, json);
+
+      const result = await promise;
+      expect(result.decision).toBe("message");
+      expect(result.hostActions).toHaveLength(1);
+      expect(result.hostActions?.[0]).toMatchObject({
+        type: "git",
+        args: ["add", "package.json"],
+      });
+    });
+
+    it("preserves explicit noop and host-action-only decisions from the sidecar", async () => {
+      const noopProc = createMockProc();
+      mockSpawn.mockReturnValueOnce(noopProc);
+
+      const noopPromise = gen.generateSuggestion("ctx", "claude");
+      completeWithText(noopProc, JSON.stringify({
+        decision: "noop",
+        message: "",
+        confidence: 12,
+        reasoning: "hold silently",
+      }));
+      const noopResult = await noopPromise;
+      expect(noopResult.decision).toBe("noop");
+
+      const hostProc = createMockProc();
+      mockSpawn.mockReturnValueOnce(hostProc);
+
+      const hostPromise = gen.generateSuggestion("ctx", "claude");
+      completeWithText(hostProc, JSON.stringify({
+        decision: "host-actions-only",
+        message: "",
+        confidence: 25,
+        reasoning: "poll CI in the background",
+        hostActions: [{ type: "gh", args: ["run", "list", "--branch", "test", "--limit", "3"], description: "check runs" }],
+      }));
+      const hostResult = await hostPromise;
+      expect(hostResult.decision).toBe("host-actions-only");
+      expect(hostResult.hostActions).toHaveLength(1);
+    });
+
     it("rejects with no output error when process succeeds but produces nothing", async () => {
       const proc = createMockProc();
       mockSpawn.mockReturnValue(proc);
@@ -1323,6 +1905,24 @@ describe("ResponseGenerator", () => {
       const responderMonitor = new FakeResponderMonitor();
       const seedTrace: any[] = [];
       const usage: any[] = [];
+      vi.spyOn(config, "loadProjectContext").mockReturnValue({
+        name: "demo",
+        directory: "/tmp/demo",
+        goals: [],
+        milestones: [],
+        techStack: [],
+        notes: "",
+        runtimeDefaults: {
+          responderByProtocol: {
+            claude: {
+              tuningMode: "manual",
+              model: "claude-opus-4-6",
+              reasoningEffort: "high",
+              permissionMode: "auto",
+            },
+          },
+        },
+      } as any);
 
       const first = await gen.generateSuggestion(
         "LLM: first guild turn",
@@ -1347,6 +1947,11 @@ describe("ResponseGenerator", () => {
 
       expect(first.text).toBe("seeded");
       expect(responderMonitor.startTurn).toHaveBeenCalledTimes(1);
+      expect(responderMonitor.setProfile).toHaveBeenCalledWith(expect.objectContaining({
+        runtime: expect.not.objectContaining({
+          permissionMode: "auto",
+        }),
+      }));
       expect(seedTrace[0].prompt).toContain("persistent hidden Roscoe responder thread");
       expect(seedTrace[0].prompt).toContain("Given the following context from active Guild coding sessions");
       expect(usage[0]).toMatchObject({ inputTokens: 10, outputTokens: 2 });
@@ -1464,6 +2069,103 @@ describe("ResponseGenerator", () => {
       expect(result.text).toBe("Recovered hold");
       expect(result.confidence).toBe(81);
       expect(responderMonitor.sendFollowUp).toHaveBeenCalledTimes(1);
+    });
+
+    it("reseeds the hidden responder thread when a resumed follow-up exits nonzero", async () => {
+      const responderMonitor = new RetryableResponderMonitor();
+      const traces: any[] = [];
+      const onResponderStateReset = vi.fn();
+
+      const result = await gen.generateSuggestion(
+        "ctx",
+        "claude",
+        {
+          profile: { name: "claude", command: "claude", args: [], protocol: "claude" },
+          profileName: "claude",
+          projectName: "demo",
+          projectDir: "/tmp/demo",
+          worktreePath: "/tmp/demo",
+          worktreeName: "main",
+          responderMonitor: responderMonitor as any,
+          responderHistory: [
+            { role: "assistant", content: "old guild turn", timestamp: 1 },
+            { role: "user", content: "keep moving", timestamp: 2 },
+          ],
+          responderHistoryCursor: 1,
+          onResponderStateReset,
+        },
+        undefined,
+        (trace) => traces.push(trace),
+      );
+
+      expect(result.text).toBe("reseeded");
+      expect(responderMonitor.sendFollowUp).toHaveBeenCalledTimes(1);
+      expect(responderMonitor.restoreSessionId).toHaveBeenCalledWith(null);
+      expect(onResponderStateReset).toHaveBeenCalledTimes(1);
+      expect(responderMonitor.startTurn).toHaveBeenCalledTimes(1);
+      expect(String(responderMonitor.startTurn.mock.calls[0][0])).toContain("persistent hidden Roscoe responder thread");
+      expect(traces.at(-1)?.rationale).toContain("cleared a failed hidden responder thread and reseeded it");
+    });
+
+    it("reseeds the hidden responder thread when it emits malformed structured draft output", async () => {
+      class MalformedThenReseedResponderMonitor extends EventEmitter {
+        private sessionId: string | null = "stale-structured-session";
+        startTurn = vi.fn((prompt: string) => {
+          this.sessionId = "fresh-structured-session";
+          setImmediate(() => {
+            this.emit("text", '{"message":"reseeded cleanly","confidence":82,"reasoning":"fresh structured draft"}');
+            this.emit("turn-complete");
+            this.emit("exit", 0);
+          });
+          return prompt;
+        });
+        sendFollowUp = vi.fn((prompt: string) => {
+          setImmediate(() => {
+            this.emit("text", "```json\n{\"decision\":\"noop\",\"message\":\"\",\"reasoning\":\"hold silently\"");
+            this.emit("turn-complete");
+            this.emit("exit", 0);
+          });
+          return prompt;
+        });
+        getSessionId = vi.fn(() => this.sessionId);
+        restoreSessionId = vi.fn((sessionId: string | null) => {
+          this.sessionId = sessionId;
+        });
+        setProfile = vi.fn();
+        kill = vi.fn();
+      }
+
+      const responderMonitor = new MalformedThenReseedResponderMonitor();
+      const traces: any[] = [];
+      const onResponderStateReset = vi.fn();
+
+      const result = await gen.generateSuggestion(
+        "ctx",
+        "claude",
+        {
+          profile: { name: "claude", command: "claude", args: [], protocol: "claude" },
+          profileName: "claude",
+          projectName: "demo",
+          projectDir: "/tmp/demo",
+          worktreePath: "/tmp/demo",
+          worktreeName: "main",
+          responderMonitor: responderMonitor as any,
+          responderHistory: [
+            { role: "assistant", content: "old guild turn", timestamp: 1 },
+            { role: "user", content: "keep moving", timestamp: 2 },
+          ],
+          responderHistoryCursor: 1,
+          onResponderStateReset,
+        },
+        undefined,
+        (trace) => traces.push(trace),
+      );
+
+      expect(result.text).toBe("reseeded cleanly");
+      expect(responderMonitor.restoreSessionId).toHaveBeenCalledWith(null);
+      expect(onResponderStateReset).toHaveBeenCalledTimes(1);
+      expect(responderMonitor.startTurn).toHaveBeenCalledTimes(1);
+      expect(traces.at(-1)?.rationale).toContain("malformed hidden responder draft");
     });
 
     it("infers Codex and Gemini responder profiles for stateless drafting", async () => {
@@ -1642,6 +2344,42 @@ describe("ResponseGenerator", () => {
         await vi.advanceTimersByTimeAsync(300_000);
         await rejection;
         expect(responderMonitor.kill).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("retries a timed-out existing responder thread by reseeding once", async () => {
+      vi.useFakeTimers();
+      const responderMonitor = new TimeoutThenReseedResponderMonitor();
+
+      try {
+        const promise = gen.generateSuggestion(
+          "ctx",
+          "claude",
+          {
+            profile: { name: "claude", command: "claude", args: [], protocol: "claude" },
+            profileName: "claude",
+            projectName: "demo",
+            projectDir: "/tmp/demo",
+            worktreePath: "/tmp/demo",
+            worktreeName: "main",
+            responderMonitor: responderMonitor as any,
+            responderHistory: [],
+            responderHistoryCursor: 1,
+          },
+        );
+
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.runAllTimersAsync();
+        const result = await promise;
+
+        expect(responderMonitor.kill).toHaveBeenCalledTimes(1);
+        expect(responderMonitor.restoreSessionId).toHaveBeenCalledWith(null);
+        expect(responderMonitor.startTurn).toHaveBeenCalledTimes(1);
+        expect(result.text).toBe("reseeded after timeout");
+        expect(result.reasoning).toBe("fresh hidden thread after timeout");
       } finally {
         vi.useRealTimers();
       }

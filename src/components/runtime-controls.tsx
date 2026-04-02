@@ -297,7 +297,7 @@ export function RuntimeEditorPanel({
   ];
   const efficiencyOptions = [
     { label: "Balanced — let Roscoe use normal depth for drafting", value: "balanced" },
-    { label: "Save tokens — keep Roscoe lighter unless the transcript clearly needs more depth", value: "save-tokens" },
+    { label: "Efficient (default) — keep Roscoe lighter unless the transcript clearly needs more depth", value: "save-tokens" },
   ];
 
   return (

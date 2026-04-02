@@ -21,7 +21,7 @@ import { BackgroundLanesPane } from "./components/background-lanes-pane.js";
 import { useEventBridge } from "./hooks/use-event-bridge.js";
 import { useHostedRelayWire } from "./hooks/use-hosted-relay-wire.js";
 import { useSmsWire } from "./hooks/use-sms-wire.js";
-import { normalizeRoscoeDraftMessage } from "./roscoe-draft.js";
+import { inferRoscoeDecision, normalizeRoscoeDraftMessage } from "./roscoe-draft.js";
 import { isParkedDecisionText, sortTranscriptEntries } from "./session-transcript.js";
 import { getPreviewState } from "./session-preview.js";
 import { loadRoscoeSettings } from "./config.js";
@@ -103,6 +103,9 @@ function dropPendingLocalSuggestions(session: SessionState): SessionState {
 function getReturnSuggestionPhase(session: SessionState): SuggestionReturnPhase {
   const lastSuggestion = [...session.timeline].reverse().find((entry) => entry.kind === "local-suggestion");
   if (!lastSuggestion || lastSuggestion.state === "dismissed") {
+    return { kind: "idle" };
+  }
+  if (inferRoscoeDecision({ message: lastSuggestion.text, reasoning: lastSuggestion.reasoning }) === "noop") {
     return { kind: "idle" };
   }
 
@@ -391,7 +394,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         status: "active",
         preview: clearPreviewUnlessQueued(session.preview),
         suggestion: { kind: "idle" },
-      }, "approved"));
+      }, "approved", action.text));
       return { ...state, sessions };
     }
 

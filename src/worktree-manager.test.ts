@@ -1,10 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const mockExecSync = vi.fn();
+const mockExecFileSync = vi.fn();
 
 vi.mock("child_process", () => ({
-  execSync: (...args: unknown[]) => mockExecSync(...args),
-  execFileSync: vi.fn(() => ""),
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 }));
 
 vi.mock("fs", () => ({
@@ -25,7 +24,7 @@ describe("WorktreeManager", () => {
   beforeEach(() => {
     mgr = new WorktreeManager("/tmp/myproject");
     vi.mocked(existsSync).mockReturnValue(false);
-    mockExecSync.mockReturnValue("");
+    mockExecFileSync.mockReturnValue("");
   });
 
   describe("constructor", () => {
@@ -41,8 +40,9 @@ describe("WorktreeManager", () => {
   describe("create", () => {
     it("calls git worktree add with correct args", async () => {
       await mgr.create("feature-x");
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('git worktree add'),
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "git",
+        ["worktree", "add", "/tmp/myproject-feature-x", "-b", "myproject-feature-x"],
         expect.objectContaining({ cwd: "/tmp/myproject" }),
       );
     });
@@ -60,10 +60,7 @@ describe("WorktreeManager", () => {
       const info = await mgr.create("feature-x");
       expect(info.name).toBe("myproject-feature-x");
       // Should not call git worktree add
-      expect(mockExecSync).not.toHaveBeenCalledWith(
-        expect.stringContaining("git worktree add"),
-        expect.anything(),
-      );
+      expect(mockExecFileSync).not.toHaveBeenCalled();
     });
 
     it("copies CLAUDE.md if it exists", async () => {
@@ -99,7 +96,7 @@ describe("WorktreeManager", () => {
 
   describe("list", () => {
     it("parses porcelain output", async () => {
-      mockExecSync.mockReturnValue(
+      mockExecFileSync.mockReturnValue(
         "worktree /tmp/myproject\nbranch refs/heads/main\n\nworktree /tmp/myproject-feat\nbranch refs/heads/myproject-feat\n\n",
       );
       const list = await mgr.list();
@@ -109,13 +106,13 @@ describe("WorktreeManager", () => {
     });
 
     it("returns empty for no worktrees output", async () => {
-      mockExecSync.mockReturnValue("");
+      mockExecFileSync.mockReturnValue("");
       const list = await mgr.list();
       expect(list).toEqual([]);
     });
 
     it("fills unknown branch names when porcelain output omits a branch line", async () => {
-      mockExecSync.mockReturnValue(
+      mockExecFileSync.mockReturnValue(
         "worktree /tmp/myproject-detached\nHEAD abcdef123\n\n",
       );
       const list = await mgr.list();
@@ -131,39 +128,43 @@ describe("WorktreeManager", () => {
   describe("remove", () => {
     it("calls git worktree remove", async () => {
       await mgr.remove("feature-x");
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining("git worktree remove"),
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "git",
+        ["worktree", "remove", "/tmp/myproject-feature-x"],
         expect.objectContaining({ cwd: "/tmp/myproject" }),
       );
     });
 
     it("includes --force when force is true", async () => {
       await mgr.remove("feature-x", true);
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining("--force"),
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "git",
+        ["worktree", "remove", "/tmp/myproject-feature-x", "--force"],
         expect.anything(),
       );
     });
 
     it("handles already-prefixed task names", async () => {
       await mgr.remove("myproject-feature-x");
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining("myproject-feature-x"),
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "git",
+        ["worktree", "remove", "/tmp/myproject-feature-x"],
         expect.anything(),
       );
     });
 
     it("swallows branch deletion failures after removing the worktree", async () => {
-      mockExecSync
+      mockExecFileSync
         .mockReturnValueOnce("")
         .mockImplementationOnce(() => {
           throw new Error("branch still merged elsewhere");
         });
 
       await expect(mgr.remove("feature-x")).resolves.toBeUndefined();
-      expect(mockExecSync).toHaveBeenNthCalledWith(
+      expect(mockExecFileSync).toHaveBeenNthCalledWith(
         2,
-        expect.stringContaining("git branch -d"),
+        "git",
+        ["branch", "-d", "myproject-feature-x"],
         expect.anything(),
       );
     });
@@ -175,8 +176,9 @@ describe("WorktreeManager", () => {
         return String(p).endsWith("package.json");
       });
       await mgr.installDeps("/tmp/wt");
-      expect(mockExecSync).toHaveBeenCalledWith(
-        "npm install",
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "npm",
+        ["install"],
         expect.objectContaining({ cwd: "/tmp/wt" }),
       );
     });
@@ -189,8 +191,9 @@ describe("WorktreeManager", () => {
         return false;
       });
       await mgr.installDeps("/tmp/wt");
-      expect(mockExecSync).toHaveBeenCalledWith(
-        "bun install",
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "bun",
+        ["install"],
         expect.anything(),
       );
     });
@@ -203,8 +206,9 @@ describe("WorktreeManager", () => {
         return false;
       });
       await mgr.installDeps("/tmp/wt");
-      expect(mockExecSync).toHaveBeenCalledWith(
-        "pnpm install",
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "pnpm",
+        ["install"],
         expect.anything(),
       );
     });
@@ -217,8 +221,9 @@ describe("WorktreeManager", () => {
         return false;
       });
       await mgr.installDeps("/tmp/wt");
-      expect(mockExecSync).toHaveBeenCalledWith(
-        "yarn install",
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "yarn",
+        ["install"],
         expect.anything(),
       );
     });
@@ -227,7 +232,7 @@ describe("WorktreeManager", () => {
       vi.mocked(existsSync).mockImplementation((p: any) => {
         return String(p).endsWith("package.json");
       });
-      mockExecSync.mockImplementationOnce(() => {
+      mockExecFileSync.mockImplementationOnce(() => {
         throw new Error("install failed");
       });
       await expect(mgr.installDeps("/tmp/wt")).resolves.toBeUndefined();
@@ -235,9 +240,9 @@ describe("WorktreeManager", () => {
 
     it("skips install when no package.json", async () => {
       vi.mocked(existsSync).mockReturnValue(false);
-      mockExecSync.mockClear();
+      mockExecFileSync.mockClear();
       await mgr.installDeps("/tmp/wt");
-      expect(mockExecSync).not.toHaveBeenCalled();
+      expect(mockExecFileSync).not.toHaveBeenCalled();
     });
   });
 

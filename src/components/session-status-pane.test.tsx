@@ -124,7 +124,10 @@ describe("SessionStatusPane", () => {
     expect(frame).toContain("Guild codex:gpt-5.4/medium");
     expect(frame).toContain("Roscoe codex:gpt-5.4/high");
     expect(frame).toContain("Guild auto");
-    expect(frame).toContain("safe");
+    expect(frame).toContain("accelerated");
+    expect(frame).toContain("Guild access open");
+    expect(frame).toContain("Roscoe access draft-only");
+    expect(frame).toContain("host bridge: git + gh run + kubectl");
     expect(frame).toContain("Roscoe arbiter");
     expect(frame).toContain("batch proofs");
     expect(frame).toContain("save tokens");
@@ -186,6 +189,8 @@ describe("SessionStatusPane", () => {
     const frame = lastFrame()!;
     expect(frame).toContain("balanced");
     expect(frame).toContain("accelerated");
+    expect(frame).toContain("Guild access open");
+    expect(frame).toContain("Roscoe access open");
     expect(frame).toContain("Guild direct");
     expect(frame).toContain("prove each slice");
     expect(frame).toContain("always ask");

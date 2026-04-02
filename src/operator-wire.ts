@@ -87,9 +87,9 @@ async function approveSuggestionFromOperator(
     return `Roscoe has no pending draft waiting for approval on ${formatSmsLaneScope(session)}.`;
   }
 
-  await service.executeSuggestion(session.managed, session.suggestion.result);
+  const sentText = await service.executeSuggestion(session.managed, session.suggestion.result);
   dispatch({ type: "SYNC_MANAGED_SESSION", id: session.id, managed: session.managed });
-  dispatch({ type: "APPROVE_SUGGESTION", id: session.id });
+  dispatch({ type: "APPROVE_SUGGESTION", id: session.id, text: sentText });
   dispatch({
     type: "APPEND_TIMELINE_ENTRY",
     id: session.id,

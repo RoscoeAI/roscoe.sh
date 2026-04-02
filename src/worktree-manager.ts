@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import {
   existsSync,
   mkdirSync,
@@ -47,7 +47,7 @@ export class WorktreeManager {
     }
 
     // Create the worktree with a new branch
-    execSync(`git worktree add "${worktreePath}" -b "${branch}"`, {
+    execFileSync("git", ["worktree", "add", worktreePath, "-b", branch], {
       cwd: this.projectDir,
       stdio: "pipe",
     });
@@ -77,7 +77,7 @@ export class WorktreeManager {
    * List all worktrees for this project.
    */
   async list(): Promise<WorktreeInfo[]> {
-    const output = execSync("git worktree list --porcelain", {
+    const output = execFileSync("git", ["worktree", "list", "--porcelain"], {
       cwd: this.projectDir,
       encoding: "utf-8",
     });
@@ -119,15 +119,14 @@ export class WorktreeManager {
       : `${this.projectName}-${taskName}`;
     const worktreePath = resolve(this.projectDir, "..", name);
 
-    const forceFlag = force ? " --force" : "";
-    execSync(`git worktree remove "${worktreePath}"${forceFlag}`, {
+    execFileSync("git", ["worktree", "remove", worktreePath, ...(force ? ["--force"] : [])], {
       cwd: this.projectDir,
       stdio: "pipe",
     });
 
     // Delete the branch too
     try {
-      execSync(`git branch -d "${name}"`, {
+      execFileSync("git", ["branch", "-d", name], {
         cwd: this.projectDir,
         stdio: "pipe",
       });
@@ -155,7 +154,7 @@ export class WorktreeManager {
     if (!existsSync(join(worktreePath, "package.json"))) return;
 
     try {
-      execSync(`${pm} install`, {
+      execFileSync(pm, ["install"], {
         cwd: worktreePath,
         stdio: "pipe",
         timeout: 120_000,

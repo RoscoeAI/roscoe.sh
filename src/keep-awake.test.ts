@@ -75,6 +75,14 @@ describe("keep-awake", () => {
     expect(isRoscoeKeepAwakeSupported()).toBe(false);
   });
 
+  it("reports support on Windows outside test mode", () => {
+    setPlatform("win32");
+    expect(isRoscoeKeepAwakeSupported()).toBe(true);
+
+    vi.stubEnv("NODE_ENV", "test");
+    expect(isRoscoeKeepAwakeSupported()).toBe(false);
+  });
+
   it("starts caffeinate once and stops it when disabled", () => {
     const child = createChild();
     mockSpawn.mockReturnValue(child);
@@ -86,6 +94,35 @@ describe("keep-awake", () => {
     expect(mockSpawn).toHaveBeenCalledWith("/usr/bin/caffeinate", ["-dimsu", "-w", String(process.pid)], {
       stdio: "ignore",
     });
+    expect(child.unref).toHaveBeenCalled();
+
+    setRoscoeKeepAwakeEnabled(false);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("starts the Windows keep-awake helper and stops it when disabled", () => {
+    setPlatform("win32");
+    const child = createChild();
+    mockSpawn.mockReturnValue(child);
+
+    setRoscoeKeepAwakeEnabled(true);
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(mockSpawn).toHaveBeenCalledWith(
+      expect.stringMatching(/powershell(?:\.exe)?$/i),
+      expect.arrayContaining([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+      ]),
+      {
+        stdio: "ignore",
+      },
+    );
+    const [, args] = mockSpawn.mock.calls[0]!;
+    expect(Array.isArray(args) && args[args.length - 1]).toContain("SetThreadExecutionState");
     expect(child.unref).toHaveBeenCalled();
 
     setRoscoeKeepAwakeEnabled(false);

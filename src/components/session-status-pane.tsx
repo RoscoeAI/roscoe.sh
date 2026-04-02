@@ -152,6 +152,22 @@ function formatCompactApprovalLabel(label: string | null): string | null {
   return label === "auto when confident" ? "auto-send" : label;
 }
 
+function formatRuntimeAccessLabel(
+  role: "Guild" | "Roscoe",
+  runtime: RuntimeControlSettings | null | undefined,
+): string {
+  const executionMode = getExecutionModeLabel(runtime);
+  if (role === "Guild") {
+    return executionMode === "accelerated"
+      ? "Guild access open"
+      : "Guild access sandboxed";
+  }
+
+  return executionMode === "accelerated"
+    ? "Roscoe access open"
+    : "Roscoe access draft-only";
+}
+
 export function SessionStatusPane({ session, projectContext = null, tokenEfficiencyMode }: SessionStatusPaneProps) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const elapsed = useMemo(() => formatElapsed(session.startedAt, nowMs), [nowMs, session.startedAt]);
@@ -166,29 +182,36 @@ export function SessionStatusPane({ session, projectContext = null, tokenEfficie
   const responderProvider = getResponderProvider(projectContext) ?? guildProvider;
   const savedWorkerRuntime = getProjectWorkerRuntime(projectContext, guildProvider) ?? session.managed.profile.runtime;
   const savedResponderRuntime = getProjectResponderRuntime(projectContext, responderProvider) ?? savedWorkerRuntime;
+  const effectiveWorkerRuntime = session.managed.profile.runtime ?? savedWorkerRuntime;
+  const effectiveResponderRuntime = session.managed.responderProfile?.runtime ?? savedResponderRuntime;
   const guildRuntime = formatRuntimeIdentity(
     session.managed.lastWorkerRuntimeSummary,
     guildProvider,
-    session.managed.profile.runtime ?? savedWorkerRuntime,
+    effectiveWorkerRuntime,
   );
   const responderRuntime = formatRuntimeIdentity(
     session.managed.lastResponderRuntimeSummary,
     responderProvider,
-    savedResponderRuntime,
+    effectiveResponderRuntime,
   );
-  const executionLabel = getExecutionModeLabel(savedWorkerRuntime);
+  const executionLabel = getExecutionModeLabel(effectiveWorkerRuntime);
   const governanceLabel = projectContext ? formatWorkerGovernanceLabel(getWorkerGovernanceMode(projectContext)) : null;
   const verificationLabel = projectContext ? formatVerificationCadenceLabel(getVerificationCadence(projectContext)) : null;
   const approvalLabel = projectContext ? formatResponderApprovalLabel(getResponderApprovalMode(projectContext) ?? "auto") : null;
   const effectiveTokenEfficiencyMode = tokenEfficiencyMode ?? (projectContext ? getTokenEfficiencyMode(projectContext) : undefined);
   const policyLine = [
-    getRuntimeTuningMode(savedWorkerRuntime) === "auto" ? "Guild auto" : "Guild pinned",
+    getRuntimeTuningMode(effectiveWorkerRuntime) === "auto" ? "Guild auto" : "Guild pinned",
     executionLabel,
     governanceLabel,
     verificationLabel,
     effectiveTokenEfficiencyMode ? formatTokenEfficiencyLabel(effectiveTokenEfficiencyMode) : null,
     formatCompactApprovalLabel(approvalLabel),
   ].filter(Boolean).join(" · ");
+  const accessLine = [
+    formatRuntimeAccessLabel("Guild", effectiveWorkerRuntime),
+    formatRuntimeAccessLabel("Roscoe", effectiveResponderRuntime),
+    "host bridge: git + gh run + kubectl",
+  ].join(" · ");
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -213,6 +236,7 @@ export function SessionStatusPane({ session, projectContext = null, tokenEfficie
       </Box>
       <Box gap={1} flexWrap="wrap">
         {policyLine ? <Text dimColor>{policyLine}</Text> : null}
+        <Text dimColor>{accessLine}</Text>
         <Pill label={onDeckLabel} color="green" />
         <Pill label={limitStatus.label} color={limitStatus.color} />
       </Box>

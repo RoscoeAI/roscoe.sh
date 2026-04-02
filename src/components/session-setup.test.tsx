@@ -571,6 +571,46 @@ describe("SessionSetup", () => {
     expect(frame).not.toContain("Continue to runtime selection");
   });
 
+  it("treats the same saved worktree across multiple runtimes as a direct continue", () => {
+    mocks.loadProjectContext.mockImplementation((directory: string) => (
+      directory === "/tmp/k12io"
+        ? {
+            name: "K12.io",
+            directory,
+            goals: [],
+            milestones: [],
+            techStack: [],
+            notes: "Saved brief",
+            runtimeDefaults: { responderApprovalMode: "auto" },
+          }
+        : null
+    ));
+    mocks.listLaneSessions.mockReturnValue([
+      {
+        projectDir: "/tmp/k12io",
+        projectName: "K12.io",
+        worktreePath: "/tmp",
+        worktreeName: "feature-roscoe",
+        profileName: "claude-code",
+        savedAt: "2026-04-01T13:14:42.854Z",
+      },
+      {
+        projectDir: "/tmp/k12io",
+        projectName: "K12.io",
+        worktreePath: "/tmp",
+        worktreeName: "feature-roscoe",
+        profileName: "codex",
+        savedAt: "2026-04-01T15:05:32.780Z",
+      },
+    ]);
+
+    const app = render(<SessionSetup preselectedProjectDir="/tmp/k12io" />);
+    const frame = app.lastFrame();
+
+    expect(frame).toContain("Continue with saved lane in K12.io");
+    expect(frame).not.toContain("Continue to runtime selection");
+  });
+
   it("shows a compact saved brief by default and expands on demand", async () => {
     mocks.loadProjectContext.mockImplementation((directory: string) => (
       directory === "/tmp/k12io"

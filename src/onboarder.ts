@@ -562,6 +562,7 @@ export class Onboarder extends EventEmitter {
   private ignoredSuccessfulExits = 0;
   private workspaceAssessment = inspectWorkspaceForOnboarding(process.cwd());
   private completed = false;
+  private persistedBriefFingerprint: string | null = null;
 
   constructor(
     projectDir: string,
@@ -611,6 +612,7 @@ export class Onboarder extends EventEmitter {
       this.rawTranscript = pruneForCheckpoint(this.rawTranscript, 20000);
     }
     this.completed = false;
+    this.persistedBriefFingerprint = null;
 
     this.profile = applyProjectEnvToProfile(this.profile, dir);
     this.session = new SessionMonitor(
@@ -618,6 +620,10 @@ export class Onboarder extends EventEmitter {
       this.profile,
       dir,
     );
+
+    if (this.recoverCompletedBriefFromSavedCheckpoint()) {
+      return;
+    }
 
     if (this.mode === "onboard" && this.onboardingCheckpoint?.sessionId) {
       this.session.restoreSessionId(this.onboardingCheckpoint.sessionId);
@@ -685,6 +691,7 @@ Ask the next highest-value question, or complete the brief if everything is read
 
   private saveCheckpoint(completed = false): void {
     if (this.mode !== "onboard") return;
+    if (this.completed && !completed) return;
     const checkpointPath = this.checkpointPath();
     if (!existsSync(resolve(this.projectDir, ".roscoe"))) {
       mkdirSync(resolve(this.projectDir, ".roscoe"), { recursive: true });
@@ -720,6 +727,83 @@ Ask the next highest-value question, or complete the brief if everything is read
     this.onboardingCheckpoint = null;
   }
 
+  private getBriefMatch(source: string): RegExpMatchArray | null {
+    return source.match(/---BRIEF---\s*\n?([\s\S]*?)\n?---END_BRIEF---/);
+  }
+
+  private persistCompletedBrief(jsonText: string, allowContinue = true): "none" | "continued" | "completed" | "invalid" {
+    const fingerprint = jsonText.trim();
+    if (this.completed || this.persistedBriefFingerprint === fingerprint) {
+      return "completed";
+    }
+
+    try {
+      const parsed = JSON.parse(fingerprint) as Partial<ProjectContext>;
+      const brief = normalizeProjectContext({
+        ...parsed,
+        directory: resolve(this.projectDir),
+        interviewAnswers: parsed.interviewAnswers ?? this.interviewAnswers,
+        ...(this.projectRuntimeDefaults
+          ? { runtimeDefaults: this.projectRuntimeDefaults }
+          : {}),
+      });
+      const readiness = this.auditInterviewReadiness(brief);
+      if (!readiness.ok) {
+        if (!allowContinue) {
+          return "none";
+        }
+        dbg("onboard", `brief rejected; missing themes=${readiness.missingThemes.join(",")} missingFields=${readiness.missingFields.join(",")}`);
+        this.requestMoreInterview(readiness);
+        return "continued";
+      }
+      dbg("onboard", `brief found: ${brief.name}`);
+      saveProjectContext(brief);
+      saveProjectHistory({
+        id: `${new Date().toISOString().replace(/[:.]/g, "-")}-${this.mode}`,
+        mode: this.mode,
+        createdAt: new Date().toISOString(),
+        directory: brief.directory,
+        projectName: brief.name,
+        runtime: {
+          profileName: this.profile.name,
+          protocol: detectProtocol(this.profile),
+          summary: summarizeRuntime(this.profile),
+          settings: this.profile.runtime ?? {},
+        },
+        rawTranscript: this.rawTranscript.trim(),
+        questions: this.questionHistory,
+        answers: this.sessionInterviewAnswers,
+        briefSnapshot: brief,
+      });
+      registerProject(brief.name, brief.directory);
+      this.completed = true;
+      this.persistedBriefFingerprint = fingerprint;
+      this.clearCheckpoint();
+      this.emit("onboarding-complete", brief);
+      return "completed";
+    } catch {
+      return "invalid";
+    }
+  }
+
+  private recoverCompletedBriefFromSavedCheckpoint(): boolean {
+    if (!this.onboardingCheckpoint) return false;
+    const checkpointSources = [
+      this.onboardingCheckpoint.outputBuffer,
+      this.onboardingCheckpoint.rawTranscript,
+    ].filter((value): value is string => typeof value === "string" && value.length > 0);
+
+    for (const source of checkpointSources) {
+      const match = this.getBriefMatch(source);
+      if (!match) continue;
+      const result = this.persistCompletedBrief(match[1].trim(), false);
+      if (result === "completed") {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private wireEvents(): void {
     if (!this.session) return;
 
@@ -730,6 +814,7 @@ Ask the next highest-value question, or complete the brief if everything is read
     });
 
     this.session.on("result", () => {
+      this.checkForProjectBrief(false);
       this.saveCheckpoint();
     });
 
@@ -858,55 +943,13 @@ Ask the next highest-value question, or complete the brief if everything is read
     this.session?.setProfile(profile);
   }
 
-  private checkForProjectBrief(): "none" | "continued" | "completed" {
-    const jsonMatch = this.outputBuffer.match(
-      /---BRIEF---\s*\n?([\s\S]*?)\n?---END_BRIEF---/,
-    );
+  private checkForProjectBrief(allowContinue = true): "none" | "continued" | "completed" {
+    const jsonMatch = this.getBriefMatch(this.outputBuffer)
+      ?? this.getBriefMatch(this.rawTranscript);
 
     if (jsonMatch) {
-      try {
-        const parsed = JSON.parse(jsonMatch[1].trim()) as Partial<ProjectContext>;
-        const brief = normalizeProjectContext({
-          ...parsed,
-          directory: resolve(this.projectDir),
-          interviewAnswers: parsed.interviewAnswers ?? this.interviewAnswers,
-          ...(this.projectRuntimeDefaults
-            ? { runtimeDefaults: this.projectRuntimeDefaults }
-            : {}),
-        });
-        const readiness = this.auditInterviewReadiness(brief);
-        if (!readiness.ok) {
-          dbg("onboard", `brief rejected; missing themes=${readiness.missingThemes.join(",")} missingFields=${readiness.missingFields.join(",")}`);
-          this.requestMoreInterview(readiness);
-          return "continued";
-        }
-        dbg("onboard", `brief found: ${brief.name}`);
-        saveProjectContext(brief);
-        saveProjectHistory({
-          id: `${new Date().toISOString().replace(/[:.]/g, "-")}-${this.mode}`,
-          mode: this.mode,
-          createdAt: new Date().toISOString(),
-          directory: brief.directory,
-          projectName: brief.name,
-          runtime: {
-            profileName: this.profile.name,
-            protocol: detectProtocol(this.profile),
-            summary: summarizeRuntime(this.profile),
-            settings: this.profile.runtime ?? {},
-          },
-          rawTranscript: this.rawTranscript.trim(),
-          questions: this.questionHistory,
-          answers: this.sessionInterviewAnswers,
-          briefSnapshot: brief,
-        });
-        registerProject(brief.name, brief.directory);
-        this.completed = true;
-        this.clearCheckpoint();
-        this.emit("onboarding-complete", brief);
-        return "completed";
-      } catch {
-        // JSON not yet complete or malformed
-      }
+      const result = this.persistCompletedBrief(jsonMatch[1].trim(), allowContinue);
+      return result === "invalid" ? "none" : result;
     }
     return "none";
   }

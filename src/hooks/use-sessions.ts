@@ -23,6 +23,10 @@ export function useSessions(
     (opts: SessionStartOpts) => {
       const { managed, restoredState } = service.startSession(opts);
       const liveFingerprint = getProjectContractFingerprint(loadProjectContext(managed.projectDir));
+      const restoredSuggestion = getRestoredSuggestionPhase(restoredState?.timeline ?? []);
+      const restoredStatus = restoredState?.status === "review" && restoredSuggestion.kind !== "ready"
+        ? "waiting"
+        : restoredState?.status ?? "active";
       dispatch({
         type: "ADD_SESSION",
         session: {
@@ -33,9 +37,9 @@ export function useSessions(
           startedAt: restoredState?.startedAt && restoredState.startedAt !== new Date(0).toISOString()
             ? restoredState.startedAt
             : new Date().toISOString(),
-          status: restoredState?.status ?? "active",
+          status: restoredStatus,
           outputLines: restoredState?.outputLines ?? [],
-          suggestion: getRestoredSuggestionPhase(restoredState?.timeline ?? []),
+          suggestion: restoredSuggestion,
           managed,
           summary: restoredState?.summary ?? null,
           currentToolUse: restoredState?.currentToolUse ?? null,

@@ -75,13 +75,14 @@ function ensureProviderSupportDir(providerId: ProviderId): void {
 function detectProvider(spec: { id: ProviderId; label: string; command: string; comingSoon: boolean }): DiscoveredProvider {
   let path: string | null = null;
   let helpText = "";
+  const locator = process.platform === "win32" ? "where.exe" : "which";
 
   try {
-    path = execFileSync("which", [spec.command], {
+    path = execFileSync(locator, [spec.command], {
       encoding: "utf-8",
       timeout: 1500,
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim() || null;
+    }).trim().split(/\r?\n/)[0]?.trim() || null;
   } catch {
     path = null;
   }

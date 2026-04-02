@@ -11,13 +11,13 @@ vi.mock("fs", () => ({
 }));
 
 vi.mock("child_process", () => ({
-  execSync: vi.fn(() => {
+  execFileSync: vi.fn(() => {
     throw new Error("not a git repo");
   }),
 }));
 
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync } from "fs";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import {
   getProjectByName,
   loadProfile,
@@ -49,7 +49,7 @@ describe("config", () => {
     resetConfigCachesForTests();
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(statSync).mockReturnValue({ isDirectory: () => false, mtimeMs: 1 } as any);
-    vi.mocked(execSync).mockImplementation(() => {
+    vi.mocked(execFileSync).mockImplementation(() => {
       throw new Error("not a git repo");
     });
   });
@@ -874,7 +874,7 @@ describe("config", () => {
     });
 
     it("canonicalizes nested git directories to the repo root", () => {
-      vi.mocked(execSync).mockReturnValue("/tmp/myproj\n" as never);
+      vi.mocked(execFileSync).mockReturnValue("/tmp/myproj\n" as never);
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ projects: [] }));
 
       registerProject("myproj", "/tmp/myproj/cli");
@@ -891,8 +891,8 @@ describe("config", () => {
     });
 
     it("migrates nested canonical storage by copying legacy and primary memory contents once", () => {
-      vi.mocked(execSync).mockImplementation(((command: string, options?: { cwd?: string }) => {
-        if (command.includes("git rev-parse") && options?.cwd === "/tmp/proj/nested") {
+      vi.mocked(execFileSync).mockImplementation(((command: string, args: string[], options?: { cwd?: string }) => {
+        if (command === "git" && args.join(" ") === "rev-parse --show-toplevel" && options?.cwd === "/tmp/proj/nested") {
           return "/tmp/proj\n";
         }
         throw new Error("not a git repo");
@@ -1167,6 +1167,50 @@ describe("config", () => {
         id: "new",
         kind: "local-suggestion",
         state: "pending",
+      });
+    });
+
+    it("dismisses persisted no-op pending suggestions when loading a saved lane", () => {
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        sessions: [
+          {
+            laneKey: "/tmp/proj::/tmp/proj::main::codex",
+            projectDir: "/tmp/proj",
+            projectName: "proj",
+            worktreePath: "/tmp/proj",
+            worktreeName: "main",
+            profileName: "codex",
+            protocol: "codex",
+            providerSessionId: "thread-1",
+            responderProtocol: "codex",
+            responderSessionId: "responder-1",
+            trackerHistory: [],
+            responderHistoryCursor: 0,
+            timeline: [
+              {
+                id: "noop",
+                kind: "local-suggestion",
+                timestamp: 1,
+                text: "",
+                confidence: 20,
+                reasoning: "Fourth consecutive no-activity delta; the NEXT.md triage direction was already sent clearly, Guild has not responded, and repeated CI polls are not producing new information — Roscoe should hold silently until a Guild turn or CI completion surfaces.",
+                state: "pending",
+              },
+            ],
+            outputLines: [],
+            summary: null,
+            currentToolUse: null,
+            savedAt: "2026-03-26T00:00:00.000Z",
+          },
+        ],
+      }));
+
+      const record = loadLaneSession("/tmp/proj", "/tmp/proj", "main", "codex");
+      expect(record?.timeline).toHaveLength(1);
+      expect(record?.timeline[0]).toMatchObject({
+        id: "noop",
+        kind: "local-suggestion",
+        state: "dismissed",
       });
     });
 
@@ -1512,8 +1556,8 @@ describe("config", () => {
     });
 
     it("dedupes duplicate lane snapshots after canonicalizing nested roots", () => {
-      vi.mocked(execSync).mockImplementation(((command: string, options?: { cwd?: string }) => {
-        if (command.includes("git rev-parse") && options?.cwd === "/tmp/proj/cli") {
+      vi.mocked(execFileSync).mockImplementation(((command: string, args: string[], options?: { cwd?: string }) => {
+        if (command === "git" && args.join(" ") === "rev-parse --show-toplevel" && options?.cwd === "/tmp/proj/cli") {
           return "/tmp/proj\n";
         }
         throw new Error("not a git repo");

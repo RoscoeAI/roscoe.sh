@@ -324,7 +324,7 @@ export function HomeScreen() {
       key: "prevent-sleep",
       label: "Prevent sleep while Roscoe runs",
       value: roscoeSettings.behavior.preventSleepWhileRunning ? "On" : "Off",
-      description: "When enabled, Roscoe uses macOS caffeinate to keep this Mac awake while the Roscoe process is running. This only affects local machine sleep, not Roscoe's own runtime logic.",
+      description: "When enabled, Roscoe uses native OS keep-awake helpers while it runs: macOS uses caffeinate, Windows uses SetThreadExecutionState via PowerShell. This only affects local machine sleep, not Roscoe's own runtime logic.",
     },
   ]), [roscoeSettings.behavior.autoHealMetadata, roscoeSettings.behavior.parkAtMilestonesForReview, roscoeSettings.behavior.preventSleepWhileRunning]);
   const notificationStatus = useMemo(
@@ -1604,7 +1604,7 @@ export function HomeScreen() {
           <Box marginTop={1} flexDirection="column">
             <Text dimColor>Scope: metadata/session healing only. Roscoe may reinterpret stale saved lane state during startup restore so it can reopen work instead of resuming dead native sessions.</Text>
             <Text dimColor>Milestone parking is <Text color="cyan">off</Text> by default. Leave it off if you want Roscoe and Guild to keep planning the next slice until the app is truly complete or blocked.</Text>
-            <Text dimColor>Keep-awake uses macOS <Text color="cyan">caffeinate</Text> so the computer does not go to sleep while Roscoe is running.</Text>
+            <Text dimColor>Keep-awake uses native OS helpers so the computer does not go to sleep while Roscoe is running: <Text color="cyan">caffeinate</Text> on macOS and <Text color="cyan">SetThreadExecutionState</Text> on Windows.</Text>
             <Text dimColor>Not included: Roscoe does not patch its own source code here. Future self-patching or hot-reload ideas stay experimental and documented separately for now.</Text>
             {roscoeMessage && <Text color={roscoeMessage.color}>{roscoeMessage.text}</Text>}
           </Box>

@@ -409,6 +409,20 @@ describe("Onboarder", () => {
       });
     });
 
+    it("persists the brief on provider result even if turn-complete has not arrived yet", () => {
+      return new Promise<void>((resolve) => {
+        onboarder.start();
+        seedInterviewCoverage(onboarder);
+        onboarder.on("onboarding-complete", (brief: any) => {
+          expect(brief.name).toBe("TestProject");
+          resolve();
+        });
+        const briefJson = JSON.stringify(buildReadyBrief());
+        mockMonitorInstance.emit("text", `Analysis complete.\n---BRIEF---\n${briefJson}\n---END_BRIEF---`);
+        mockMonitorInstance.emit("result");
+      });
+    });
+
     it("keeps interviewing for a greenfield UI brief that never defines the local first-run path", () => {
       onboarder.start();
       seedInterviewCoverage(onboarder);

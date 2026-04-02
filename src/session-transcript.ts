@@ -1,7 +1,11 @@
 import { RestoreRecovery, SuggestionPhase, TranscriptEntry } from "./types.js";
+import { shouldSuppressRestoredRoscoeSuggestion } from "./roscoe-draft.js";
 
 function isConversationEntry(entry: TranscriptEntry): boolean {
-  return entry.kind === "remote-turn" || entry.kind === "local-suggestion" || entry.kind === "local-sent";
+  if (entry.kind === "local-suggestion") {
+    return entry.state === "pending";
+  }
+  return entry.kind === "remote-turn" || entry.kind === "local-sent";
 }
 
 export function sortTranscriptEntries(entries: TranscriptEntry[]): TranscriptEntry[] {
@@ -248,6 +252,9 @@ export function getRestoredSuggestionPhase(entries: TranscriptEntry[]): Suggesti
   for (let index = sorted.length - 1; index >= 0; index -= 1) {
     const entry = sorted[index];
     if (entry.kind === "local-suggestion" && entry.state === "pending") {
+      if (shouldSuppressRestoredRoscoeSuggestion({ message: entry.text, reasoning: entry.reasoning })) {
+        return { kind: "idle" };
+      }
       return {
         kind: "ready",
         result: {
@@ -259,4 +266,20 @@ export function getRestoredSuggestionPhase(entries: TranscriptEntry[]): Suggesti
     }
   }
   return { kind: "idle" };
+}
+
+export function normalizeRestoredTimeline(entries: TranscriptEntry[]): TranscriptEntry[] {
+  return sortTranscriptEntries(entries).map((entry) => {
+    if (
+      entry.kind === "local-suggestion"
+      && entry.state === "pending"
+      && shouldSuppressRestoredRoscoeSuggestion({ message: entry.text, reasoning: entry.reasoning })
+    ) {
+      return {
+        ...entry,
+        state: "dismissed" as const,
+      };
+    }
+    return entry;
+  });
 }

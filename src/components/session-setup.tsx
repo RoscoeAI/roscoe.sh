@@ -177,24 +177,33 @@ export function SessionSetup({ preselectedProjectDir, openedFromSessionView = fa
       listLaneSessions(selectedProject.directory)
         .filter((record) => !autoHealMetadata || record.status !== "exited")
         .filter((record) => record.worktreeName === "main" || existsSync(record.worktreePath))
-        .reduce((byLane, record) => {
-          const laneIdentity = [
+        .reduce((byWorktree, record) => {
+          const worktreeIdentity = [
             record.projectDir,
             record.worktreePath,
             record.worktreeName,
-            record.profileName,
           ].join("::");
-          const existing = byLane.get(laneIdentity);
-          if (!existing || record.savedAt > existing.savedAt) {
-            byLane.set(laneIdentity, record);
+          const existing = byWorktree.get(worktreeIdentity);
+          const recordSavedAt = record.savedAt ?? "";
+          const existingSavedAt = existing?.savedAt ?? "";
+          const selectedProfileMatch = selectedProfile.length > 0 && record.profileName === selectedProfile;
+          const existingSelectedProfileMatch = Boolean(
+            selectedProfile.length > 0 && existing?.profileName === selectedProfile,
+          );
+          if (
+            !existing
+            || (selectedProfileMatch && !existingSelectedProfileMatch)
+            || (selectedProfileMatch === existingSelectedProfileMatch && recordSavedAt > existingSavedAt)
+          ) {
+            byWorktree.set(worktreeIdentity, record);
           }
-          return byLane;
+          return byWorktree;
         }, new Map<string, ReturnType<typeof listLaneSessions>[number]>())
         .values(),
     );
 
     return lanes.length === 1 ? lanes[0] : null;
-  }, [autoHealMetadata, selectedProject]);
+  }, [autoHealMetadata, selectedProject, selectedProfile]);
   const guildProvider = getGuildProvider(selectedProjectContext);
   const responderProvider = getResponderProvider(selectedProjectContext);
   const savedGuildRuntime = guildProvider
@@ -413,7 +422,9 @@ export function SessionSetup({ preselectedProjectDir, openedFromSessionView = fa
       const { managed, restoredState } = service.startSession(spec);
       lastStartedId = managed.id;
       const restoredSuggestion = getRestoredSuggestionPhase(restoredState?.timeline ?? []);
-      const restoredStatus = restoredState?.status
+      const restoredStatus = restoredState?.status === "review" && restoredSuggestion.kind !== "ready"
+        ? "waiting"
+        : restoredState?.status
         ?? (restoredSuggestion.kind === "ready" ? "review" : "active");
       dispatch({
         type: "ADD_SESSION",

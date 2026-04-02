@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
@@ -35,10 +35,17 @@ import {
 } from "./provider-registry.js";
 
 describe("provider registry", () => {
+  let platformSpy: ReturnType<typeof vi.spyOn> | null = null;
+
   beforeEach(() => {
     mocks.execFileSync.mockReset();
     mocks.mkdirSync.mockReset();
     resetProviderRegistryCacheForTests();
+  });
+
+  afterEach(() => {
+    platformSpy?.mockRestore();
+    platformSpy = null;
   });
 
   it("discovers installed providers, managed flags, and MCP preflight details", () => {
@@ -113,6 +120,30 @@ describe("provider registry", () => {
       },
     });
     expect(mocks.mkdirSync).toHaveBeenCalled();
+  });
+
+  it("uses where.exe on Windows when discovering provider binaries", () => {
+    platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    mocks.execFileSync.mockImplementation((command: string, args: string[]) => {
+      if (command === "where.exe" && args[0] === "claude") return "C:\\Claude\\claude.cmd\r\n";
+      if (command === "where.exe" && args[0] === "codex") throw new Error("missing");
+      if (command === "where.exe" && args[0] === "gemini") throw new Error("missing");
+
+      if (command === "C:\\Claude\\claude.cmd" && args[0] === "--help") {
+        return "Usage\n--output-format\n--resume\n";
+      }
+      if (command === "C:\\Claude\\claude.cmd" && args[0] === "mcp") {
+        return "No MCP servers configured.\n";
+      }
+
+      throw new Error(`unexpected execFileSync call: ${command} ${args.join(" ")}`);
+    });
+
+    const providers = discoverProviders();
+    const claude = providers.find((provider) => provider.id === "claude");
+
+    expect(claude?.installed).toBe(true);
+    expect(claude?.path).toBe("C:\\Claude\\claude.cmd");
   });
 
   it("falls back cleanly when providers are missing or MCP checks fail", () => {

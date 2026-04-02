@@ -373,12 +373,12 @@ export function SessionView({ startSpecs, startRuntimeOverrides }: SessionViewPr
 
     const approveSuggestion = async () => {
       if (!activeSession || activeSession.suggestion.kind !== "ready") return;
-      await service.executeSuggestion(
+      const sentText = await service.executeSuggestion(
         activeSession.managed,
         activeSession.suggestion.result,
       );
       dispatch({ type: "SYNC_MANAGED_SESSION", id: activeSession.id, managed: activeSession.managed });
-      dispatch({ type: "APPROVE_SUGGESTION", id: activeSession.id });
+      dispatch({ type: "APPROVE_SUGGESTION", id: activeSession.id, text: sentText });
     };
 
     const retrySuggestion = async () => {
@@ -390,13 +390,14 @@ export function SessionView({ startSpecs, startRuntimeOverrides }: SessionViewPr
           activeSession.managed,
           createPartialDispatcher(dispatch, id),
           (usage) => dispatch({ type: "ADD_SESSION_USAGE", id, usage }),
+          () => state.sessions.get(id) ?? activeSession,
         );
         dispatch({ type: "SUGGESTION_READY", id, result });
         if (state.autoMode && service.generator.meetsThreshold(result)) {
-          await service.executeSuggestion(activeSession.managed, result);
+          const sentText = await service.executeSuggestion(activeSession.managed, result);
           dispatch({ type: "SYNC_MANAGED_SESSION", id, managed: activeSession.managed });
-          dispatch({ type: "AUTO_SENT", id, text: result.text, confidence: result.confidence });
-          if (result.text.trim()) {
+          dispatch({ type: "AUTO_SENT", id, text: sentText, confidence: result.confidence });
+          if (sentText.trim()) {
             setTimeout(() => {
               dispatch({ type: "CLEAR_AUTO_SENT", id });
             }, 2000);
