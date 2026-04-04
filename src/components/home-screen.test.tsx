@@ -8,6 +8,8 @@ let lastOnDone: (() => void) | null = null;
 
 const mocks = vi.hoisted(() => ({
   dispatch: vi.fn(),
+  dbg: vi.fn(),
+  debugEnabled: false,
   saveRoscoeSettings: vi.fn(),
   setRoscoeKeepAwakeEnabled: vi.fn(),
   ensureHostedRelayClientId: vi.fn(() => "client-123"),
@@ -26,7 +28,7 @@ const mocks = vi.hoisted(() => ({
     inboundMode: "webhook" as const,
     inboundDetail: "Webhook inbound ready.",
   },
-  discoverProviders: vi.fn(() => ([
+  discoverProviders: vi.fn(async () => ([
     {
       id: "claude",
       label: "Claude",
@@ -45,7 +47,6 @@ const mocks = vi.hoisted(() => ({
       preflight: {
         headlessReady: true,
         mcpListReady: true,
-        serenaVisible: false,
         mcpServers: ["chrome-devtools", "Neon"],
         note: "Checking MCP server health...",
       },
@@ -68,9 +69,44 @@ const mocks = vi.hoisted(() => ({
       preflight: {
         headlessReady: true,
         mcpListReady: true,
-        serenaVisible: true,
         mcpServers: ["chrome-devtools", "serena"],
         note: null,
+      },
+    },
+    {
+      id: "qwen",
+      label: "Qwen",
+      command: "qwen",
+      installed: true,
+      path: "/Users/timheckel/.local/bin/qwen",
+      comingSoon: false,
+      helpFlags: ["--output-format", "--resume", "--include-partial-messages"],
+      managedToggles: [],
+      sessionCommands: [],
+      extraFlags: [],
+      preflight: {
+        headlessReady: true,
+        mcpListReady: true,
+        mcpServers: [],
+        note: "No MCP servers configured.",
+      },
+    },
+    {
+      id: "kimi",
+      label: "Kimi",
+      command: "kimi",
+      installed: true,
+      path: "/Users/timheckel/.local/bin/kimi",
+      comingSoon: false,
+      helpFlags: ["--print", "--output-format", "--resume", "--thinking"],
+      managedToggles: [],
+      sessionCommands: [],
+      extraFlags: [],
+      preflight: {
+        headlessReady: true,
+        mcpListReady: true,
+        mcpServers: [],
+        note: "No MCP servers configured.",
       },
     },
     {
@@ -87,7 +123,6 @@ const mocks = vi.hoisted(() => ({
       preflight: {
         headlessReady: true,
         mcpListReady: true,
-        serenaVisible: false,
         mcpServers: [],
         note: "No MCP servers configured.",
       },
@@ -119,6 +154,12 @@ const mocks = vi.hoisted(() => ({
       codex: {
         enabled: true,
         webSearch: false,
+      },
+      qwen: {
+        enabled: true,
+      },
+      kimi: {
+        enabled: false,
       },
       gemini: {
         enabled: true,
@@ -244,6 +285,18 @@ vi.mock("../open-url.js", () => ({
   openExternalUrl: mocks.openExternalUrl,
 }));
 
+vi.mock("../debug-log.js", () => ({
+  enableDebug: () => {
+    mocks.debugEnabled = true;
+  },
+  isDebug: () => mocks.debugEnabled,
+  dbg: (...args: unknown[]) => {
+    if (mocks.debugEnabled) {
+      mocks.dbg(...args);
+    }
+  },
+}));
+
 vi.mock("../notification-service.js", () => {
   const cleanPhoneNumber = (value: string) => {
     const trimmed = value.trim();
@@ -276,7 +329,16 @@ vi.mock("../notification-service.js", () => {
 
 vi.mock("../provider-registry.js", () => ({
   discoverProviders: mocks.discoverProviders,
-  getProviderLabel: (provider: string) => provider === "claude" ? "Claude" : provider === "codex" ? "Codex" : "Gemini",
+  discoverProvidersAsync: mocks.discoverProviders,
+  getProviderLabel: (provider: string) => provider === "claude"
+    ? "Claude"
+    : provider === "codex"
+      ? "Codex"
+      : provider === "qwen"
+        ? "Qwen"
+      : provider === "kimi"
+        ? "Kimi"
+        : "Gemini",
 }));
 
 vi.mock("./roscoe-intro.js", () => ({
@@ -343,9 +405,22 @@ async function moveDownUntil(app: ReturnType<typeof render>, snippet: string, ma
   throw new Error(`Did not reach selection containing: ${snippet}`);
 }
 
+async function moveRightUntil(app: ReturnType<typeof render>, snippet: string, maxSteps = 8) {
+  for (let i = 0; i < maxSteps; i += 1) {
+    if (app.lastFrame()?.includes(snippet)) {
+      return;
+    }
+    app.stdin.write("\u001B[C");
+    await delay();
+  }
+  throw new Error(`Did not reach provider detail containing: ${snippet}`);
+}
+
 describe("HomeScreen", () => {
   beforeEach(() => {
     vi.useRealTimers();
+    mocks.dbg.mockReset();
+    mocks.debugEnabled = false;
     mocks.dispatch.mockReset();
     mocks.saveRoscoeSettings.mockReset();
     mocks.setRoscoeKeepAwakeEnabled.mockReset();
@@ -381,6 +456,12 @@ describe("HomeScreen", () => {
         codex: {
           enabled: true,
           webSearch: false,
+        },
+        qwen: {
+          enabled: true,
+        },
+        kimi: {
+          enabled: false,
         },
         gemini: {
           enabled: true,
@@ -469,22 +550,18 @@ describe("HomeScreen", () => {
 
     expect(describeHostedSmsResult("16122030386", {
       ok: true,
-      delivered: false,
-      terminal: true,
-      status: "undelivered",
-      errorMessage: "carrier blocked",
+      roundTripVerified: true,
     })).toEqual({
-      text: "Hosted relay test SMS did not deliver (undelivered). carrier blocked Checkout remains locked until delivery is confirmed.",
-      color: "red",
+      text: "Hosted relay round trip verified for 16122030386. Reply C reached roscoe.sh and was delivered back into this CLI.",
+      color: "green",
     });
 
     expect(describeHostedSmsResult("16122030386", {
       ok: true,
-      delivered: false,
-      terminal: false,
-      status: "queued",
+      delivered: true,
+      terminal: true,
     })).toEqual({
-      text: "Hosted relay test SMS submitted to Twilio for 16122030386 (queued). Delivery is not confirmed yet, so checkout remains locked.",
+      text: "Hosted relay test SMS delivered to 16122030386. Reply C to verify the round trip back into this CLI.",
       color: "yellow",
     });
 
@@ -492,8 +569,19 @@ describe("HomeScreen", () => {
       ok: true,
       delivered: false,
       terminal: true,
+      status: "undelivered",
+      errorMessage: "carrier blocked",
     })).toEqual({
-      text: "Hosted relay test SMS did not deliver. Checkout remains locked until delivery is confirmed.",
+      text: "Hosted relay test SMS did not deliver (undelivered). carrier blocked",
+      color: "red",
+    });
+
+    expect(describeHostedSmsResult("16122030386", {
+      ok: true,
+      delivered: false,
+      terminal: true,
+    })).toEqual({
+      text: "Hosted relay test SMS did not deliver.",
       color: "red",
     });
 
@@ -503,7 +591,7 @@ describe("HomeScreen", () => {
       terminal: false,
       errorMessage: "carrier still pending",
     })).toEqual({
-      text: "Hosted relay test SMS submitted to Twilio for 16122030386 (queued). Delivery is not confirmed yet, so checkout remains locked. carrier still pending",
+      text: "Hosted relay test SMS submitted to Twilio for 16122030386 (queued). Reply C when it arrives to verify the round trip. carrier still pending",
       color: "yellow",
     });
   });
@@ -607,16 +695,16 @@ describe("HomeScreen", () => {
     expect(app.lastFrame()).toContain("Provider Setup");
     expect(app.lastFrame()).not.toContain("Project Memory");
     expect(app.lastFrame()).not.toContain("Optional two-way SMS wire for milestones, intervention, and check-ins");
-    expect(mocks.discoverProviders).not.toHaveBeenCalled();
+    await delay();
+    expect(mocks.discoverProviders).toHaveBeenCalled();
 
     app.stdin.write("\u001B[C");
     await delay();
-    expect(mocks.discoverProviders).toHaveBeenCalledTimes(1);
     expect(app.lastFrame()).toContain("Provider Setup");
     expect(app.lastFrame()).toContain("Installed CLIs");
     expect(app.lastFrame()).toContain("headless ready");
     expect(app.lastFrame()).toContain("mcp ready");
-    expect(app.lastFrame()).toContain("serena missing");
+    expect(app.lastFrame()).toContain("2 MCP servers");
     expect(app.lastFrame()).toContain("MCP servers:");
 
     app.stdin.write("\u001B[C");
@@ -742,6 +830,24 @@ describe("HomeScreen", () => {
     expect(app.lastFrame()).toContain("Channel Setup");
   });
 
+  it("writes navigation traces while the home TUI is active when debug logging is enabled", async () => {
+    mocks.debugEnabled = true;
+    const app = await bootHome();
+    mocks.dbg.mockClear();
+
+    app.stdin.write("\u001B[C");
+    await delay();
+    app.stdin.write("\u001B[C");
+    await delay();
+    app.stdin.write("\u001B[B");
+    await delay();
+
+    const logs = mocks.dbg.mock.calls.map(([label, message]) => `${String(label)} ${String(message)}`);
+    expect(logs.some((entry) => entry.includes("home:key") && entry.includes("key=right"))).toBe(true);
+    expect(logs.some((entry) => entry.includes("home ") && entry.includes("tab=roscoe"))).toBe(true);
+    expect(logs.some((entry) => entry.includes("home ") && entry.includes("focus=roscoe-actions"))).toBe(true);
+  });
+
   it("shows a return-to-running-lane action when a live lane exists", async () => {
     mocks.state.sessions = new Map([
       ["lane-1", {
@@ -827,12 +933,7 @@ describe("HomeScreen", () => {
     first.unmount();
 
     const app = render(<HomeScreen />);
-    app.stdin.write("\u001B[C");
-    await delay();
-    app.stdin.write("\u001B[C");
-    await delay();
-    app.stdin.write("\u001B[C");
-    await delay();
+    await moveToTabLabel(app, "Channel Setup");
     app.stdin.write("\u001B[B");
     await delay();
     app.stdin.write("\u001B[B");
@@ -925,10 +1026,11 @@ describe("HomeScreen", () => {
     first.unmount();
 
     const app = render(<HomeScreen />);
+    await delay();
     app.stdin.write("\u001B[C");
     await delay();
 
-    expect(mocks.discoverProviders).toHaveBeenCalledTimes(1);
+    expect(mocks.discoverProviders).toHaveBeenCalled();
     expect(app.lastFrame()).toContain("Provider Setup");
     expect(app.lastFrame()).toContain("Claude");
     expect(app.lastFrame()).toContain("Codex");
@@ -945,7 +1047,7 @@ describe("HomeScreen", () => {
     app.stdin.write("\u001B[C");
     await delay(40);
 
-    expect(app.lastFrame()).toContain("Channel Setup");
+    await moveToTabLabel(app, "Channel Setup");
     expect(app.lastFrame()).toContain("Roscoe-hosted");
     expect(app.lastFrame()).toContain("Slack, Discord, Telegram, WhatsApp");
     expect(app.lastFrame()).not.toContain("Project Memory");
@@ -978,7 +1080,7 @@ describe("HomeScreen", () => {
     }
   });
 
-  it("renders active hosted status, monthly-only pricing, and linked fallback text", async () => {
+  it("renders active hosted status, monthly-only pricing, and bidirectional fallback text", async () => {
     const previousVitest = process.env.VITEST;
     delete process.env.VITEST;
     mocks.settings.notifications.deliveryMode = "roscoe-hosted";
@@ -1026,8 +1128,7 @@ describe("HomeScreen", () => {
       expect(app.lastFrame()).toContain("subscription active");
       expect(app.lastFrame()).toContain("Checkout");
       expect(app.lastFrame()).toContain("Active");
-      expect(app.lastFrame()).toContain("Link This CLI");
-      expect(app.lastFrame()).toContain("Linked");
+      expect(app.lastFrame()).toContain("bidirectional ready");
       expect(app.lastFrame()).not.toContain("annual");
     } finally {
       process.env.VITEST = previousVitest;
@@ -1113,24 +1214,24 @@ describe("HomeScreen", () => {
     expect(app.lastFrame()).toContain("Dispatch Board");
   });
 
-  it("does not scan providers until Provider Setup is opened", async () => {
+  it("starts scanning providers in the background on home load", async () => {
     const first = render(<HomeScreen />);
     lastOnDone?.();
     first.unmount();
 
     const app = render(<HomeScreen />);
     expect(app.lastFrame()).toContain("Dispatch Board");
-    expect(mocks.discoverProviders).not.toHaveBeenCalled();
+    await delay();
+    expect(mocks.discoverProviders).toHaveBeenCalled();
 
     app.stdin.write("\u001B[C");
     await delay();
 
     expect(app.lastFrame()).toContain("Provider Setup");
-    expect(mocks.discoverProviders).toHaveBeenCalledTimes(1);
   });
 
   it("shows the no-provider state when no installed providers are detected", async () => {
-    mocks.discoverProviders.mockReturnValueOnce([]);
+    mocks.discoverProviders.mockResolvedValue([]);
 
     const first = render(<HomeScreen />);
     lastOnDone?.();
@@ -1146,6 +1247,7 @@ describe("HomeScreen", () => {
 
   it("toggles provider-managed flags and guards against hiding the last enabled provider", async () => {
     mocks.settings.providers.codex.enabled = false;
+    mocks.settings.providers.qwen.enabled = false;
     mocks.settings.providers.gemini.enabled = false;
 
     const first = render(<HomeScreen />);
@@ -1278,7 +1380,7 @@ describe("HomeScreen", () => {
     expect(app.lastFrame()).toContain("Roscoe-hosted");
     expect(app.lastFrame()).toContain("Send Hosted Test SMS");
     expect(app.lastFrame()).toContain("Checkout");
-    expect(app.lastFrame()).toContain("Link This CLI");
+    expect(app.lastFrame()).toContain("round trip pending");
     expect(app.lastFrame()).toContain("Loading pricing");
     expect(app.lastFrame()).toContain("Slack, Discord, Telegram, WhatsApp");
   });
@@ -1396,7 +1498,7 @@ describe("HomeScreen", () => {
     expect(app.lastFrame()).toContain("Phone number cleared");
   });
 
-  it("blocks hosted actions until the required phone verification steps are complete", async () => {
+  it("blocks hosted test and checkout until the required phone setup steps are complete", async () => {
     const first = render(<HomeScreen />);
     lastOnDone?.();
     first.unmount();
@@ -1428,15 +1530,9 @@ describe("HomeScreen", () => {
     app.stdin.write("\r");
     await delay();
     expect(app.lastFrame()).toContain("Save a phone number before opening hosted checkout");
-
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\r");
-    await delay();
-    expect(app.lastFrame()).toContain("Save a phone number before linking this CLI");
   });
 
-  it("sends a hosted test SMS and unlocks checkout", async () => {
+  it("sends a hosted test SMS and prompts for the round-trip reply", async () => {
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1461,7 +1557,7 @@ describe("HomeScreen", () => {
       if (url.includes("/api/relay/sms/test")) {
         return {
           ok: true,
-          json: async () => ({ ok: true, sid: "SM123", status: "delivered", delivered: true, terminal: true }),
+          json: async () => ({ ok: true, sid: "SM123", status: "delivered", delivered: true, terminal: true, roundTripVerified: true }),
         };
       }
       if (url.includes("/api/relay/billing/checkout-session")) {
@@ -1502,44 +1598,58 @@ describe("HomeScreen", () => {
     expect(mocks.saveRoscoeSettings.mock.calls.some(([settings]) =>
       settings?.notifications?.hostedTestVerifiedPhone === "16122030386",
     )).toBe(true);
-    expect(app.lastFrame()).toContain("Checkout is now unlocked");
+    expect(app.lastFrame()).toContain("Hosted relay round trip verified");
 
   });
 
   it("requests a hosted checkout session URL", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(String(input)).toContain("/api/relay/billing/checkout-session");
+      expect(String(init?.body ?? "")).toContain("\"clientId\":\"client-123\"");
       return {
         ok: true,
         json: async () => ({ ok: true, url: "https://checkout.example/session" }),
       };
     }) as unknown as typeof fetch);
 
-    await expect(requestHostedCheckoutSession("https://roscoe.sh", "16122030386"))
-      .resolves.toBe("https://checkout.example/session");
+    await expect(requestHostedCheckoutSession("https://roscoe.sh", "16122030386", "client-123"))
+      .resolves.toMatchObject({ url: "https://checkout.example/session" });
   });
 
-  it("links the CLI through the hosted relay device flow", async () => {
+  it("opens hosted checkout in the browser as soon as it is selected", async () => {
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
-    mocks.settings.notifications.hostedTestVerifiedPhone = "16122030386";
-    mocks.startHostedRelayDeviceLink.mockResolvedValue({
-      ok: true,
-      deviceCode: "ABCD-1234",
-      verificationUrlComplete: "https://roscoe.sh/link?code=ABCD-1234",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      pollIntervalSeconds: 0,
-    });
-    mocks.pollHostedRelayDeviceLink.mockResolvedValue({
-      ok: true,
-      status: "approved",
-      accessToken: "access-token",
-      accessTokenExpiresAt: "2026-04-01T00:00:00.000Z",
-      refreshToken: "refresh-token",
-      phone: "16122030386",
-      userEmail: "tim@slatebox.com",
-      pollIntervalSeconds: 1,
-    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/relay/billing/plans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            plans: [
+              { priceId: "price_month", amount: 500, currency: "usd", interval: "month", intervalCount: 1, label: "$5/mo" },
+            ],
+          }),
+        };
+      }
+      if (url.includes("/api/relay/billing/status")) {
+        return {
+          ok: true,
+          json: async () => ({ ok: true, status: { phone: "16122030386", subscriptionStatus: null, active: false } }),
+        };
+      }
+      if (url.includes("/api/relay/billing/checkout-session")) {
+        expect(init?.method).toBe("POST");
+        return {
+          ok: true,
+          json: async () => ({ ok: true, url: "https://checkout.example/session" }),
+        };
+      }
+      return {
+        ok: false,
+        json: async () => ({ error: "Unhandled fetch in test" }),
+      };
+    }) as unknown as typeof fetch);
 
     const first = render(<HomeScreen />);
     lastOnDone?.();
@@ -1558,29 +1668,12 @@ describe("HomeScreen", () => {
     await delay();
     app.stdin.write("\u001B[B");
     await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    vi.useFakeTimers();
+    await moveDownUntil(app, "› Checkout");
     app.stdin.write("\r");
-    await vi.advanceTimersByTimeAsync(1000);
-    await Promise.resolve();
-    vi.useRealTimers();
+    await delay(80);
 
-    expect(mocks.ensureHostedRelayClientId).toHaveBeenCalled();
-    expect(mocks.openExternalUrl).toHaveBeenCalledWith("https://roscoe.sh/link?code=ABCD-1234");
-    expect(mocks.saveRoscoeSettings).toHaveBeenCalledWith(expect.objectContaining({
-      notifications: expect.objectContaining({
-        hostedRelayAccessToken: "access-token",
-        hostedRelayRefreshToken: "refresh-token",
-        hostedRelayLinkedPhone: "16122030386",
-        hostedRelayLinkedEmail: "tim@slatebox.com",
-      }),
-    }));
-    expect(app.lastFrame()).toContain("now linked to roscoe.sh as tim@slatebox.com");
+    expect(mocks.openExternalUrl).toHaveBeenCalledWith("https://checkout.example/session");
+    expect(app.lastFrame()).toContain("Opened hosted checkout in your browser.");
   });
 
   it("arms self-hosted SMS and sends a local test text", async () => {
@@ -1663,7 +1756,7 @@ describe("HomeScreen", () => {
     expect(app.lastFrame()).toContain("Twilio send failed");
   });
 
-  it("keeps hosted checkout locked when the hosted test SMS does not deliver", async () => {
+  it("surfaces hosted test SMS delivery failures without gating checkout", async () => {
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -1715,7 +1808,6 @@ describe("HomeScreen", () => {
     await delay(100);
 
     expect(app.lastFrame()).toContain("did not deliver");
-    expect(app.lastFrame()).toContain("Checkout remains locked");
     expect(mocks.saveRoscoeSettings).not.toHaveBeenCalledWith(expect.objectContaining({
       notifications: expect.objectContaining({
         hostedTestVerifiedPhone: "16122030386",
@@ -1763,39 +1855,6 @@ describe("HomeScreen", () => {
     await delay();
 
     expect(app.lastFrame()).toContain("Checkout provider unavailable");
-  });
-
-  it("shows a hosted link expiration error when approval never completes", async () => {
-    mocks.settings.notifications.deliveryMode = "roscoe-hosted";
-    mocks.settings.notifications.phoneNumber = "16122030386";
-    mocks.settings.notifications.consentAcknowledged = true;
-    mocks.settings.notifications.hostedTestVerifiedPhone = "16122030386";
-    mocks.startHostedRelayDeviceLink.mockResolvedValueOnce({
-      ok: true,
-      deviceCode: "DEV-1",
-      verificationUrlComplete: "https://roscoe.sh/link?device_code=DEV-1",
-      expiresAt: new Date(Date.now() - 500).toISOString(),
-      pollIntervalSeconds: 1,
-    });
-
-    const app = await bootHome();
-    await moveToTab(app, 3);
-    await delay();
-
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\r");
-    await delay(50);
-
-    expect(app.lastFrame()).toContain("Hosted relay link request expired before approval completed");
   });
 
   it("blocks self-hosted SMS arming when a phone is saved but consent is still missing", async () => {
@@ -1888,18 +1947,39 @@ describe("HomeScreen", () => {
     app.stdin.write("\r");
     await delay();
     expect(app.lastFrame()).toContain("Accept SMS consent before opening hosted checkout");
-
-    await moveDownUntil(app, "› Link This CLI");
-    app.stdin.write("\r");
-    await delay();
-    expect(app.lastFrame()).toContain("Accept SMS consent before linking this CLI");
   });
 
-  it("blocks hosted checkout and linking until the test SMS is verified", async () => {
+  it("opens hosted checkout even before the hosted test SMS is verified", async () => {
     mocks.settings.notifications.deliveryMode = "roscoe-hosted";
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
     mocks.settings.notifications.hostedTestVerifiedPhone = "";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/relay/billing/plans")) {
+        return {
+          ok: true,
+          json: async () => ({ ok: true, plans: [{ priceId: "price_month", amount: 500, currency: "usd", interval: "month", intervalCount: 1, label: "$5/mo" }] }),
+        };
+      }
+      if (url.includes("/api/relay/billing/status")) {
+        return {
+          ok: true,
+          json: async () => ({ ok: true, status: { phone: "16122030386", subscriptionStatus: null, active: false } }),
+        };
+      }
+      if (url.includes("/api/relay/billing/checkout-session")) {
+        expect(init?.method).toBe("POST");
+        return {
+          ok: true,
+          json: async () => ({ ok: true, url: "https://checkout.example/session" }),
+        };
+      }
+      return {
+        ok: false,
+        json: async () => ({ error: "Unhandled fetch in test" }),
+      };
+    }) as unknown as typeof fetch);
 
     const app = await bootHome();
     await moveToTab(app, 3);
@@ -1907,13 +1987,10 @@ describe("HomeScreen", () => {
 
     await moveDownUntil(app, "› Checkout");
     app.stdin.write("\r");
-    await delay();
-    expect(app.lastFrame()).toContain("Send a hosted test SMS first. Checkout stays locked until delivery is confirmed.");
+    await delay(80);
 
-    await moveDownUntil(app, "› Link This CLI");
-    app.stdin.write("\r");
-    await delay();
-    expect(app.lastFrame()).toContain("Send a hosted test SMS first so Roscoe can verify this phone before linking the CLI.");
+    expect(mocks.openExternalUrl).toHaveBeenCalledWith("https://checkout.example/session");
+    expect(app.lastFrame()).toContain("Opened hosted checkout in your browser.");
   });
 
   it("re-verifies the same hosted phone by clearing the prior verification first", async () => {
@@ -1938,7 +2015,7 @@ describe("HomeScreen", () => {
       if (url.includes("/api/relay/sms/test")) {
         return {
           ok: true,
-          json: async () => ({ ok: true, sid: "SM999", status: "delivered", delivered: true, terminal: true }),
+          json: async () => ({ ok: true, sid: "SM999", status: "delivered", delivered: true, terminal: true, roundTripVerified: true }),
         };
       }
       return {
@@ -2021,7 +2098,7 @@ describe("HomeScreen", () => {
     app.stdin.write("\u001B[C");
     await delay();
     expect(app.lastFrame()).toContain("Codex");
-    expect(app.lastFrame()).toContain("serena visible");
+    expect(app.lastFrame()).toContain("2 MCP servers");
 
     app.stdin.write("\u001B[D");
     await delay();
@@ -2046,17 +2123,26 @@ describe("HomeScreen", () => {
     expect(app.lastFrame()).toContain("Roscoe Settings");
   });
 
-  it("renders Gemini provider details and handles providers with no managed toggles", async () => {
+  it("renders Qwen, Kimi, and Gemini provider details and handles providers with no managed toggles", async () => {
     const app = await bootHome();
     await moveToTab(app, 1);
     await delay();
 
     app.stdin.write("\u001B[B");
     await delay();
-    app.stdin.write("\u001B[C");
-    await delay();
-    app.stdin.write("\u001B[C");
-    await delay();
+    await moveRightUntil(app, "Qwen availability");
+    const qwenFrame = app.lastFrame()!;
+    expect(qwenFrame).toContain("Qwen");
+    expect(qwenFrame).toContain("Qwen availability");
+    expect(qwenFrame).toContain("Qwen lanes use --output-format stream-json");
+
+    await moveRightUntil(app, "Kimi availability");
+    const kimiFrame = app.lastFrame()!;
+    expect(kimiFrame).toContain("Kimi");
+    expect(kimiFrame).toContain("Kimi availability");
+    expect(kimiFrame).toContain("Kimi lanes use --print --output-format stream-json");
+
+    await moveRightUntil(app, "Gemini availability");
 
     const frame = app.lastFrame()!;
     expect(frame).toContain("Gemini");
@@ -2071,27 +2157,22 @@ describe("HomeScreen", () => {
   });
 
   it("renders provider scanning and no-provider states when discovery changes", async () => {
-    const first = render(<HomeScreen />);
-    lastOnDone?.();
-    first.unmount();
+    let resolveProviders: ((value: any[]) => void) | null = null;
+    mocks.discoverProviders.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveProviders = resolve;
+    }));
 
-    const realSetTimeout = global.setTimeout;
-    const setTimeoutSpy = vi.spyOn(global, "setTimeout").mockImplementation((() => 0) as typeof setTimeout);
     const app = render(<HomeScreen />);
+    lastOnDone?.();
+    await delay();
     app.stdin.write("\u001B[C");
-    await new Promise<void>((resolve) => realSetTimeout(resolve, 20));
+    await delay();
     expect(app.lastFrame()).toContain("scanning");
 
-    setTimeoutSpy.mockRestore();
-    mocks.discoverProviders.mockReturnValueOnce([]);
-    app.unmount();
-
-    const refreshed = await bootHome();
-    await moveToTab(refreshed, 1);
+    resolveProviders?.([]);
     await delay(50);
-
-    expect(refreshed.lastFrame()).toContain("none detected");
-    expect(refreshed.lastFrame()).toContain("No supported providers were detected on this machine.");
+    expect(app.lastFrame()).toContain("none detected");
+    expect(app.lastFrame()).toContain("No supported providers were detected on this machine.");
   });
 
   it("moves focus back to the home tabs when up-arrow is pressed on the first channel action", async () => {
@@ -2111,236 +2192,6 @@ describe("HomeScreen", () => {
     const frame = app.lastFrame()!;
     expect(frame).toContain("▸ Channel Setup");
     expect(frame).not.toContain("› Channel Route");
-  });
-
-  it("surfaces a hosted link bootstrap failure before polling begins", async () => {
-    mocks.settings.notifications.deliveryMode = "roscoe-hosted";
-    mocks.settings.notifications.phoneNumber = "16122030386";
-    mocks.settings.notifications.consentAcknowledged = true;
-    mocks.settings.notifications.hostedTestVerifiedPhone = "16122030386";
-    mocks.startHostedRelayDeviceLink.mockResolvedValueOnce({
-      ok: false,
-      error: "Unable to start hosted relay linking.",
-    });
-
-    const app = await bootHome();
-    await moveToTab(app, 3);
-    await delay();
-
-    await moveDownUntil(app, "› Link This CLI");
-    app.stdin.write("\r");
-    await delay(50);
-
-    expect(app.lastFrame()).toContain("Unable to start hosted relay linking.");
-    expect(mocks.openExternalUrl).not.toHaveBeenCalled();
-  });
-
-  it("keeps polling a hosted link until approval completes", async () => {
-    mocks.settings.notifications.deliveryMode = "roscoe-hosted";
-    mocks.settings.notifications.phoneNumber = "16122030386";
-    mocks.settings.notifications.consentAcknowledged = true;
-    mocks.settings.notifications.hostedTestVerifiedPhone = "16122030386";
-    mocks.startHostedRelayDeviceLink.mockResolvedValueOnce({
-      ok: true,
-      deviceCode: "DEV-2",
-      verificationUrlComplete: "https://roscoe.sh/link?device_code=DEV-2",
-      expiresAt: new Date(Date.now() + 120_000).toISOString(),
-      pollIntervalSeconds: 1,
-    });
-    mocks.pollHostedRelayDeviceLink
-      .mockResolvedValueOnce({
-        ok: true,
-        status: "pending",
-        pollIntervalSeconds: 1,
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        status: "approved",
-        accessToken: "linked-access",
-        accessTokenExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-        refreshToken: "linked-refresh",
-        phone: "16122030386",
-        userEmail: "tim@slatebox.com",
-      });
-
-    const app = await bootHome();
-    await moveToTab(app, 3);
-    await delay();
-
-    await moveDownUntil(app, "› Link This CLI");
-    vi.useFakeTimers();
-    app.stdin.write("\r");
-    await vi.advanceTimersByTimeAsync(2500);
-    await Promise.resolve();
-    vi.useRealTimers();
-
-    expect(mocks.pollHostedRelayDeviceLink).toHaveBeenCalledTimes(2);
-    expect(mocks.saveRoscoeSettings).toHaveBeenCalledWith(expect.objectContaining({
-      notifications: expect.objectContaining({
-        hostedRelayAccessToken: "linked-access",
-        hostedRelayRefreshToken: "linked-refresh",
-        hostedRelayLinkedPhone: "16122030386",
-        hostedRelayLinkedEmail: "tim@slatebox.com",
-      }),
-    }));
-  });
-
-  it("surfaces hosted relay link failures without storing credentials", async () => {
-    mocks.settings.notifications.phoneNumber = "16122030386";
-    mocks.settings.notifications.consentAcknowledged = true;
-    mocks.settings.notifications.hostedTestVerifiedPhone = "16122030386";
-    mocks.startHostedRelayDeviceLink.mockResolvedValue({
-      ok: true,
-      deviceCode: "ABCD-1234",
-      verificationUrlComplete: "https://roscoe.sh/link?code=ABCD-1234",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      pollIntervalSeconds: 0,
-    });
-    mocks.pollHostedRelayDeviceLink.mockResolvedValue({
-      ok: false,
-      error: "approval denied",
-    });
-
-    const first = render(<HomeScreen />);
-    lastOnDone?.();
-    first.unmount();
-
-    const app = render(<HomeScreen />);
-    app.stdin.write("\u001B[C");
-    await delay();
-    app.stdin.write("\u001B[C");
-    await delay();
-    app.stdin.write("\u001B[C");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\r");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    app.stdin.write("\u001B[B");
-    await delay();
-    vi.useFakeTimers();
-    app.stdin.write("\r");
-    await vi.advanceTimersByTimeAsync(1000);
-    await Promise.resolve();
-    vi.useRealTimers();
-
-    expect(app.lastFrame()).toContain("approval denied");
-    expect(mocks.saveRoscoeSettings).not.toHaveBeenCalledWith(expect.objectContaining({
-      notifications: expect.objectContaining({
-        hostedRelayAccessToken: "access-token",
-      }),
-    }));
-  });
-
-  it("surfaces invalid hosted relay bootstrap payloads and non-error link failures", async () => {
-    mocks.settings.notifications.deliveryMode = "roscoe-hosted";
-    mocks.settings.notifications.phoneNumber = "16122030386";
-    mocks.settings.notifications.consentAcknowledged = true;
-    mocks.settings.notifications.hostedTestVerifiedPhone = "16122030386";
-    mocks.startHostedRelayDeviceLink.mockResolvedValueOnce({
-      ok: true,
-      deviceCode: "DEV-3",
-      verificationUrlComplete: "",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      pollIntervalSeconds: 1,
-    });
-
-    let app = await bootHome();
-    await moveToTab(app, 3);
-    await delay();
-    await moveDownUntil(app, "› Link This CLI");
-    app.stdin.write("\r");
-    await delay(60);
-    expect(app.lastFrame()).toContain("Unable to start hosted relay linking.");
-    app.unmount();
-
-    mocks.startHostedRelayDeviceLink.mockResolvedValueOnce({
-      ok: true,
-      deviceCode: "DEV-4",
-      verificationUrlComplete: "https://roscoe.sh/link?device_code=DEV-4",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      pollIntervalSeconds: 0,
-    });
-    mocks.pollHostedRelayDeviceLink.mockResolvedValueOnce({
-      ok: false,
-      error: "",
-    });
-
-    app = await bootHome();
-    await moveToTab(app, 3);
-    await delay();
-    await moveDownUntil(app, "› Link This CLI");
-    vi.useFakeTimers();
-    app.stdin.write("\r");
-    await vi.advanceTimersByTimeAsync(1100);
-    await Promise.resolve();
-    vi.useRealTimers();
-    expect(app.lastFrame()).toContain("Unable to link this Roscoe CLI to the hosted relay.");
-  });
-
-  it("stores hosted relay credentials without an email and handles expired link requests", async () => {
-    mocks.settings.notifications.deliveryMode = "roscoe-hosted";
-    mocks.settings.notifications.phoneNumber = "16122030386";
-    mocks.settings.notifications.consentAcknowledged = true;
-    mocks.settings.notifications.hostedTestVerifiedPhone = "16122030386";
-    mocks.startHostedRelayDeviceLink.mockResolvedValueOnce({
-      ok: true,
-      deviceCode: "DEV-5",
-      verificationUrlComplete: "https://roscoe.sh/link?device_code=DEV-5",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      pollIntervalSeconds: 1,
-    });
-    mocks.pollHostedRelayDeviceLink.mockResolvedValueOnce({
-      ok: true,
-      status: "approved",
-      accessToken: "access-no-email",
-      accessTokenExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-      refreshToken: "refresh-no-email",
-      phone: "16122030386",
-      userEmail: "",
-    });
-
-    let app = await bootHome();
-    await moveToTab(app, 3);
-    await delay();
-    await moveDownUntil(app, "› Link This CLI");
-    vi.useFakeTimers();
-    app.stdin.write("\r");
-    await vi.advanceTimersByTimeAsync(1100);
-    await Promise.resolve();
-    vi.useRealTimers();
-
-    expect(mocks.saveRoscoeSettings).toHaveBeenCalledWith(expect.objectContaining({
-      notifications: expect.objectContaining({
-        hostedRelayAccessToken: "access-no-email",
-        hostedRelayRefreshToken: "refresh-no-email",
-        hostedRelayLinkedEmail: "",
-      }),
-    }));
-    expect(app.lastFrame()).toContain("This Roscoe CLI is now linked to roscoe.sh.");
-    app.unmount();
-
-    mocks.startHostedRelayDeviceLink.mockResolvedValueOnce({
-      ok: true,
-      deviceCode: "DEV-6",
-      verificationUrlComplete: "https://roscoe.sh/link?device_code=DEV-6",
-      expiresAt: new Date(Date.now() - 1000).toISOString(),
-      pollIntervalSeconds: 1,
-    });
-
-    app = await bootHome();
-    await moveToTab(app, 3);
-    await delay();
-    await moveDownUntil(app, "› Link This CLI");
-    app.stdin.write("\r");
-    await delay(50);
-    expect(app.lastFrame()).toContain("Hosted relay link request expired before approval completed.");
   });
 
   it("handles non-delivered and rejected self-hosted SMS test results", async () => {

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import { TextInput } from "@inkjs/ui";
+import { Spinner, TextInput } from "@inkjs/ui";
 import { useAppContext } from "../app.js";
 import {
   ensureHostedRelayClientId,
@@ -13,17 +13,14 @@ import { KeyHints, Panel, Pill } from "./chrome.js";
 import { RoscoeIntro } from "./roscoe-intro.js";
 import { cleanPhoneNumber, NotificationService } from "../notification-service.js";
 import {
-  discoverProviders,
+  discoverProvidersAsync,
   getProviderLabel,
   type DiscoveredProvider,
 } from "../provider-registry.js";
 import type { SessionState } from "../types.js";
 import { setRoscoeKeepAwakeEnabled } from "../keep-awake.js";
-import {
-  pollHostedRelayDeviceLink,
-  startHostedRelayDeviceLink,
-} from "../hosted-relay-client.js";
 import { openExternalUrl } from "../open-url.js";
+import { dbg } from "../debug-log.js";
 
 const HOME_TABS = [
   { label: "Dispatch Board", value: "dispatch" },
@@ -59,6 +56,13 @@ interface HostedRelayStatus {
   subscriptionStatus: string | null;
   active: boolean;
   recordUpdatedAt?: string;
+  roundTripVerified?: boolean;
+  roundTripVerifiedAt?: string;
+  accessToken?: string;
+  accessTokenExpiresAt?: string;
+  refreshToken?: string;
+  linkedPhone?: string;
+  userEmail?: string;
 }
 
 interface HostedRelaySmsStatus {
@@ -70,6 +74,64 @@ interface HostedRelaySmsStatus {
   errorCode?: string | number | null;
   errorMessage?: string | null;
   error?: string;
+  roundTripVerified?: boolean;
+  roundTripVerifiedAt?: string;
+  accessToken?: string;
+  accessTokenExpiresAt?: string;
+  refreshToken?: string;
+  phone?: string;
+  linkedPhone?: string;
+  userEmail?: string;
+}
+
+interface HostedRelayLinkSnapshot {
+  accessToken?: string;
+  accessTokenExpiresAt?: string;
+  refreshToken?: string;
+  phone?: string;
+  linkedPhone?: string;
+  userEmail?: string;
+}
+
+interface HostedCheckoutSessionResult extends HostedRelayLinkSnapshot {
+  url: string;
+}
+
+interface HomeInputKey {
+  return?: boolean;
+  escape?: boolean;
+  leftArrow?: boolean;
+  rightArrow?: boolean;
+  upArrow?: boolean;
+  downArrow?: boolean;
+  tab?: boolean;
+  shift?: boolean;
+  ctrl?: boolean;
+  meta?: boolean;
+  backspace?: boolean;
+  delete?: boolean;
+}
+
+function describeHomeKey(input: string, key: HomeInputKey): string {
+  if (key.leftArrow) return "left";
+  if (key.rightArrow) return "right";
+  if (key.upArrow) return "up";
+  if (key.downArrow) return "down";
+  if (key.return || input === "\r" || input === "\n") return "enter";
+  if (key.escape) return "escape";
+  if (key.tab) return key.shift ? "shift+tab" : "tab";
+  if (key.backspace) return "backspace";
+  if (key.delete) return "delete";
+  if (key.ctrl) return "ctrl";
+  if (key.meta) return "meta";
+  if (input) return "character";
+  return "unknown";
+}
+
+function describeMcpServerCount(count: number): string {
+  if (count === 0) return "0 MCP servers";
+  if (count === 1) return "1 MCP server";
+  return `${count} MCP servers`;
 }
 
 export function getRelayBaseUrl(): string {
@@ -163,10 +225,17 @@ export function describeHostedSmsResult(phone: string, result: HostedRelaySmsSta
     };
   }
 
+  if (result.roundTripVerified) {
+    return {
+      text: `Hosted relay round trip verified for ${phone}. Reply C reached roscoe.sh and was delivered back into this CLI.`,
+      color: "green",
+    };
+  }
+
   if (result.delivered) {
     return {
-      text: `Hosted relay test SMS delivered to ${phone}. Checkout is now unlocked for this phone.`,
-      color: "green",
+      text: `Hosted relay test SMS delivered to ${phone}. Reply C to verify the round trip back into this CLI.`,
+      color: "yellow",
     };
   }
 
@@ -174,7 +243,7 @@ export function describeHostedSmsResult(phone: string, result: HostedRelaySmsSta
     const status = result.status ? ` (${result.status})` : "";
     const detail = result.errorMessage ? ` ${result.errorMessage}` : "";
     return {
-      text: `Hosted relay test SMS did not deliver${status}.${detail} Checkout remains locked until delivery is confirmed.`,
+      text: `Hosted relay test SMS did not deliver${status}.${detail}`,
       color: "red",
     };
   }
@@ -182,7 +251,7 @@ export function describeHostedSmsResult(phone: string, result: HostedRelaySmsSta
   const status = result.status ?? "queued";
   const detail = result.errorMessage ? ` ${result.errorMessage}` : "";
   return {
-    text: `Hosted relay test SMS submitted to Twilio for ${phone} (${status}). Delivery is not confirmed yet, so checkout remains locked.${detail}`,
+    text: `Hosted relay test SMS submitted to Twilio for ${phone} (${status}). Reply C when it arrives to verify the round trip.${detail}`,
     color: "yellow",
   };
 }
@@ -215,12 +284,13 @@ export async function pollHostedTestSmsStatus(relayBaseUrl: string, sid: string)
   return lastResult;
 }
 
-export async function requestHostedCheckoutSession(relayBaseUrl: string, phone: string): Promise<string> {
+export async function requestHostedCheckoutSession(relayBaseUrl: string, phone: string, clientId: string): Promise<HostedCheckoutSessionResult> {
   const response = await fetch(new URL("/api/relay/billing/checkout-session", relayBaseUrl), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       phone,
+      clientId,
       successUrl: `${relayBaseUrl}/sms-consent?relay=success`,
       cancelUrl: `${relayBaseUrl}/sms-consent?relay=cancel`,
     }),
@@ -229,7 +299,15 @@ export async function requestHostedCheckoutSession(relayBaseUrl: string, phone: 
   if (!response.ok || !payload.url) {
     throw new Error(payload.error || "Failed to create hosted relay checkout session.");
   }
-  return payload.url;
+  return {
+    url: payload.url,
+    accessToken: typeof (payload as HostedRelayLinkSnapshot).accessToken === "string" ? (payload as HostedRelayLinkSnapshot).accessToken : undefined,
+    accessTokenExpiresAt: typeof (payload as HostedRelayLinkSnapshot).accessTokenExpiresAt === "string" ? (payload as HostedRelayLinkSnapshot).accessTokenExpiresAt : undefined,
+    refreshToken: typeof (payload as HostedRelayLinkSnapshot).refreshToken === "string" ? (payload as HostedRelayLinkSnapshot).refreshToken : undefined,
+    phone: typeof (payload as HostedRelayLinkSnapshot).phone === "string" ? (payload as HostedRelayLinkSnapshot).phone : undefined,
+    linkedPhone: typeof (payload as HostedRelayLinkSnapshot).linkedPhone === "string" ? (payload as HostedRelayLinkSnapshot).linkedPhone : undefined,
+    userEmail: typeof (payload as HostedRelayLinkSnapshot).userEmail === "string" ? (payload as HostedRelayLinkSnapshot).userEmail : undefined,
+  };
 }
 
 let hasShownRoscoeIntro = false;
@@ -413,8 +491,18 @@ export function HomeScreen() {
         {
           key: "hosted-test",
           label: "Send Hosted Test SMS",
-          value: wireBusy ? "Sending..." : "Ready",
-          description: "Press Enter to send a Roscoe-hosted test SMS before checkout.",
+          value: wireBusy
+            ? "Sending..."
+            : hostedRelayLinked
+              ? "Round trip ready"
+              : hostedTestVerified
+                ? "Reply C to confirm"
+                : "Ready",
+          description: hostedRelayLinked
+            ? "Press Enter to send another hosted round-trip test SMS."
+            : hostedTestVerified
+              ? "The test SMS delivered. Reply C when it arrives so you can verify the inbound path back into this CLI."
+              : "Press Enter to send a Roscoe-hosted test SMS. Reply C when it arrives so you can verify the round trip back into this CLI.",
         },
         {
           key: "hosted-checkout",
@@ -424,21 +512,9 @@ export function HomeScreen() {
             : monthlyPlan
               ? `${formatPlanAmount(monthlyPlan.amount, monthlyPlan.currency)}/${monthlyPlan.interval}${annualPlan ? ` · annual ${formatPlanAmount(annualPlan.amount, annualPlan.currency)}/${annualPlan.interval}` : ""}`
               : "Loading pricing...",
-          description: hostedTestVerified
-            ? "Press Enter to open checkout. Roscoe will activate the hosted relay after billing is confirmed."
-            : "Send a hosted test SMS first. Checkout stays locked until delivery is actually confirmed.",
-        },
-        {
-          key: "hosted-link",
-          label: "Link This CLI",
-          value: hostedRelayLinked
-            ? roscoeSettings.notifications.hostedRelayLinkedEmail || "Linked"
-            : wireBusy
-              ? "Linking..."
-              : "Not linked",
-          description: hostedTestVerified
-            ? "Press Enter to open roscoe.sh in the browser, approve this CLI, and store the hosted relay credentials locally."
-            : "Send a hosted test SMS first so Roscoe verifies the phone before linking this CLI.",
+          description: hostedStatus?.active
+            ? "Subscription is already active for this phone."
+            : "Press Enter to open Stripe checkout in your browser and activate roscoe-hosted messaging.",
         },
         {
           key: "route-reset",
@@ -495,9 +571,52 @@ export function HomeScreen() {
   ]);
 
   const handleIntroDone = () => {
+    dbg("home:action", "intro=done");
     hasShownRoscoeIntro = true;
     setShowIntro(false);
   };
+
+  const maybePersistHostedRelayLink = (snapshot: HostedRelayLinkSnapshot | null | undefined, fallbackPhone: string): boolean => {
+    if (!snapshot?.accessToken && !snapshot?.refreshToken) {
+      return false;
+    }
+
+    const linkedPhone = cleanPhoneNumber(snapshot.linkedPhone ?? snapshot.phone ?? fallbackPhone);
+    const latest = loadRoscoeSettings();
+    saveRoscoeSettings({
+      ...latest,
+      notifications: {
+        ...latest.notifications,
+        phoneNumber: fallbackPhone,
+        hostedRelayAccessToken: snapshot.accessToken ?? latest.notifications.hostedRelayAccessToken,
+        hostedRelayAccessTokenExpiresAt: snapshot.accessTokenExpiresAt ?? latest.notifications.hostedRelayAccessTokenExpiresAt,
+        hostedRelayRefreshToken: snapshot.refreshToken ?? latest.notifications.hostedRelayRefreshToken,
+        hostedRelayLinkedPhone: linkedPhone || latest.notifications.hostedRelayLinkedPhone,
+        hostedRelayLinkedEmail: snapshot.userEmail ?? latest.notifications.hostedRelayLinkedEmail,
+      },
+    });
+    setWireRevision((value) => value + 1);
+    return true;
+  };
+
+  useEffect(() => {
+    dbg(
+      "home",
+      `tab=${activeTab} focus=${focusArea} dispatch=${dispatchIndex} providerTab=${providerTabIndex} providerAction=${providerActionIndex} roscoeAction=${roscoeActionIndex} channelAction=${channelActionIndex} editing=${editingChannelField ?? "off"} consent=${pendingConsentPhone ? "pending" : "off"} pending=${pendingDispatchTarget ?? "none"} intro=${showIntro ? "on" : "off"}`,
+    );
+  }, [
+    activeTab,
+    channelActionIndex,
+    dispatchIndex,
+    editingChannelField,
+    focusArea,
+    pendingConsentPhone,
+    pendingDispatchTarget,
+    providerActionIndex,
+    providerTabIndex,
+    roscoeActionIndex,
+    showIntro,
+  ]);
 
   useEffect(() => {
     if (!pendingDispatchTarget) return;
@@ -514,19 +633,35 @@ export function HomeScreen() {
   }, [dispatch, pendingDispatchTarget]);
 
   useEffect(() => {
-    if (activeTab !== "providers" || providerDiscoveryStatus !== "idle") {
-      return;
-    }
-
+    dbg("home:providers", "status=loading");
     setProviderDiscoveryStatus("loading");
-    const timer = setTimeout(() => {
-      const providers = discoverProviders().filter((provider) => provider.installed);
-      setDiscoveredProviders(providers);
-      setProviderDiscoveryStatus("ready");
-    }, 0);
+    setProviderMessage(null);
+    let cancelled = false;
 
-    return () => clearTimeout(timer);
-  }, [activeTab, providerDiscoveryStatus]);
+    void discoverProvidersAsync()
+      .then((providers) => {
+        if (cancelled) return;
+        const installedProviders = providers.filter((provider) => provider.installed);
+        dbg("home:providers", `status=ready count=${installedProviders.length}`);
+        setDiscoveredProviders(installedProviders);
+        setProviderDiscoveryStatus("ready");
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        const detail = error instanceof Error ? error.message : String(error);
+        dbg("home:providers", `status=failed detail=${detail}`);
+        setDiscoveredProviders([]);
+        setProviderMessage({
+          text: `Provider scan failed: ${detail}`,
+          color: "red",
+        });
+        setProviderDiscoveryStatus("ready");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (providerTabIndex < discoveredProviders.length || discoveredProviders.length === 0) {
@@ -547,7 +682,7 @@ export function HomeScreen() {
     let cancelled = false;
     const relayBaseUrl = getRelayBaseUrl();
 
-    const run = async () => {
+    const loadPlans = async () => {
       try {
         const plansResponse = await fetch(new URL("/api/relay/billing/plans", relayBaseUrl));
         if (plansResponse.ok) {
@@ -561,7 +696,9 @@ export function HomeScreen() {
           setHostedPlans([]);
         }
       }
+    };
 
+    const syncStatus = async () => {
       const phone = cleanPhoneNumber(roscoeSettings.notifications.phoneNumber);
       if (!phone) {
         if (!cancelled) setHostedStatus(null);
@@ -571,10 +708,23 @@ export function HomeScreen() {
       try {
         const statusUrl = new URL("/api/relay/billing/status", relayBaseUrl);
         statusUrl.searchParams.set("phone", phone);
+        statusUrl.searchParams.set("clientId", ensureHostedRelayClientId());
         const statusResponse = await fetch(statusUrl);
         if (!statusResponse.ok) return;
         const payload = await statusResponse.json() as { ok: boolean; status?: HostedRelayStatus };
         if (!cancelled && payload.status) {
+          maybePersistHostedRelayLink(payload.status, phone);
+          const latestSettings = loadRoscoeSettings();
+          if (payload.status.roundTripVerified && latestSettings.notifications.hostedTestVerifiedPhone !== phone) {
+            saveRoscoeSettings({
+              ...latestSettings,
+              notifications: {
+                ...latestSettings.notifications,
+                hostedTestVerifiedPhone: phone,
+              },
+            });
+            setWireRevision((value) => value + 1);
+          }
           setHostedStatus(payload.status);
         }
       } catch {
@@ -584,13 +734,19 @@ export function HomeScreen() {
       }
     };
 
-    void run();
+    void loadPlans();
+    void syncStatus();
+    const interval = setInterval(() => {
+      void syncStatus();
+    }, 5000);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   }, [channelRoute, roscoeSettings.notifications.phoneNumber]);
 
   const setChannelRoute = (nextRoute: "self-hosted" | "roscoe-hosted" | "unconfigured") => {
+    dbg("home:channel", `route=${nextRoute}`);
     saveRoscoeSettings({
       ...roscoeSettings,
       notifications: {
@@ -613,7 +769,7 @@ export function HomeScreen() {
     setChannelActionIndex(0);
     setWireMessage({
       text: nextRoute === "roscoe-hosted"
-        ? "Roscoe-hosted relay selected. Save a phone number, send a hosted test SMS, then activate billing."
+        ? "Roscoe-hosted relay selected. Save a phone number, send a hosted test SMS, or open checkout whenever you're ready."
         : nextRoute === "self-hosted"
           ? "Self-hosted delivery selected. Gather the local env vars and save them in the active project's .env.local."
           : "Channel route cleared. Choose Roscoe-hosted or self-hosted to continue.",
@@ -622,11 +778,13 @@ export function HomeScreen() {
   };
 
   const selectHomeTab = (tab: HomeTab) => {
+    dbg("home:action", `tab=${tab}`);
     setActiveTab(tab);
     setFocusArea("tabs");
   };
 
   const handleSelect = (value: string) => {
+    dbg("home:action", `dispatch=${value}`);
     switch (value) {
       case "return-to-active-lane":
         if (activeRunningSession) {
@@ -659,6 +817,7 @@ export function HomeScreen() {
 
   const toggleProviderAction = (actionKey: string) => {
     if (!activeProvider) return;
+    dbg("home:provider", `provider=${activeProvider.id} action=${actionKey}`);
 
     if (actionKey === "enabled") {
       if (
@@ -790,10 +949,11 @@ export function HomeScreen() {
     setWireBusy(true);
     setWireMessage({ text: "Sending Roscoe-hosted test SMS...", color: "yellow" });
     const relayBaseUrl = getRelayBaseUrl();
+    const clientId = ensureHostedRelayClientId();
     fetch(new URL("/api/relay/sms/test", relayBaseUrl), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone }),
+      body: JSON.stringify({ phone, clientId }),
     })
       .then(async (response) => {
         const payload = await response.json().catch(() => ({} as HostedRelaySmsStatus));
@@ -804,7 +964,7 @@ export function HomeScreen() {
           ? await pollHostedTestSmsStatus(relayBaseUrl, payload.sid)
           : payload;
 
-        if (finalResult.delivered) {
+        if (finalResult.roundTripVerified) {
           saveRoscoeSettings({
             ...roscoeSettings,
             notifications: {
@@ -815,6 +975,7 @@ export function HomeScreen() {
           setWireRevision((value) => value + 1);
         }
 
+        maybePersistHostedRelayLink(finalResult, phone);
         setWireMessage(describeHostedSmsResult(phone, finalResult));
       })
       .catch((error: unknown) => {
@@ -839,20 +1000,25 @@ export function HomeScreen() {
       setWireMessage({ text: "Accept SMS consent before opening hosted checkout.", color: "yellow" });
       return;
     }
-    if (!hostedTestVerified) {
-      setWireMessage({ text: "Send a hosted test SMS first. Checkout stays locked until delivery is confirmed.", color: "yellow" });
-      return;
-    }
 
     setWireBusy(true);
     setWireMessage({ text: "Creating hosted relay checkout...", color: "yellow" });
     const relayBaseUrl = getRelayBaseUrl();
-    requestHostedCheckoutSession(relayBaseUrl, phone)
-      .then((url) => {
-        setWireMessage({
-          text: `Hosted checkout ready: ${url}`,
-          color: "green",
-        });
+    requestHostedCheckoutSession(relayBaseUrl, phone, ensureHostedRelayClientId())
+      .then(async (result) => {
+        maybePersistHostedRelayLink(result, phone);
+        try {
+          await openExternalUrl(result.url);
+          setWireMessage({
+            text: "Opened hosted checkout in your browser.",
+            color: "green",
+          });
+        } catch {
+          setWireMessage({
+            text: `Hosted checkout ready: ${result.url}`,
+            color: "green",
+          });
+        }
       })
       .catch((error: unknown) => {
         setWireMessage({
@@ -863,92 +1029,6 @@ export function HomeScreen() {
       .finally(() => {
         setWireBusy(false);
         setWireRevision((value) => value + 1);
-      });
-  };
-
-  const linkHostedRelayCli = () => {
-    if (wireBusy) return;
-    const phone = cleanPhoneNumber(roscoeSettings.notifications.phoneNumber);
-    if (!phone) {
-      setWireMessage({ text: "Save a phone number before linking this CLI.", color: "yellow" });
-      return;
-    }
-    if (!roscoeSettings.notifications.consentAcknowledged) {
-      setWireMessage({ text: "Accept SMS consent before linking this CLI.", color: "yellow" });
-      return;
-    }
-    if (!hostedTestVerified) {
-      setWireMessage({ text: "Send a hosted test SMS first so Roscoe can verify this phone before linking the CLI.", color: "yellow" });
-      return;
-    }
-
-    const relayBaseUrl = getRelayBaseUrl();
-    const clientId = ensureHostedRelayClientId();
-    setWireBusy(true);
-    setWireMessage({
-      text: "Starting hosted relay link. Roscoe will open the browser and wait for approval.",
-      color: "yellow",
-    });
-
-    void startHostedRelayDeviceLink(relayBaseUrl, phone, clientId)
-      .then(async (result) => {
-        if (!result.ok || !result.deviceCode || !result.verificationUrlComplete) {
-          throw new Error(result.error || "Unable to start hosted relay linking.");
-        }
-
-        await openExternalUrl(result.verificationUrlComplete);
-        setWireMessage({
-          text: `Browser opened for device code ${result.deviceCode}. Sign in on roscoe.sh and approve this CLI. Roscoe is polling for completion.`,
-          color: "yellow",
-        });
-
-        const expiresAt = result.expiresAt ? Date.parse(result.expiresAt) : Date.now() + 10 * 60_000;
-        let pollIntervalMs = Math.max(1000, (result.pollIntervalSeconds ?? 2) * 1000);
-
-        while (Date.now() < expiresAt) {
-          await delay(pollIntervalMs);
-          const poll = await pollHostedRelayDeviceLink(relayBaseUrl, result.deviceCode, clientId);
-          if (!poll.ok) {
-            throw new Error(poll.error || "Unable to link this Roscoe CLI to the hosted relay.");
-          }
-          if (poll.status === "pending") {
-            pollIntervalMs = Math.max(1000, poll.pollIntervalSeconds * 1000);
-            continue;
-          }
-
-          const latest = loadRoscoeSettings();
-          saveRoscoeSettings({
-            ...latest,
-            notifications: {
-              ...latest.notifications,
-              phoneNumber: phone,
-              hostedRelayAccessToken: poll.accessToken,
-              hostedRelayAccessTokenExpiresAt: poll.accessTokenExpiresAt,
-              hostedRelayRefreshToken: poll.refreshToken,
-              hostedRelayLinkedPhone: poll.phone,
-              hostedRelayLinkedEmail: poll.userEmail ?? "",
-            },
-          });
-          setWireRevision((value) => value + 1);
-          setWireMessage({
-            text: poll.userEmail
-              ? `This Roscoe CLI is now linked to roscoe.sh as ${poll.userEmail}.`
-              : "This Roscoe CLI is now linked to roscoe.sh.",
-            color: "green",
-          });
-          return;
-        }
-
-        throw new Error("Hosted relay link request expired before approval completed. Start linking again from Channel Setup.");
-      })
-      .catch((error: unknown) => {
-        setWireMessage({
-          text: error instanceof Error ? error.message : "Unable to link this Roscoe CLI to the hosted relay.",
-          color: "red",
-        });
-      })
-      .finally(() => {
-        setWireBusy(false);
       });
   };
 
@@ -1022,6 +1102,11 @@ export function HomeScreen() {
   }, [activeTab, editingChannelField, focusArea, pendingConsentPhone, pendingDispatchTarget]);
 
   useInput((input, key) => {
+    dbg(
+      "home:key",
+      `key=${describeHomeKey(input, key)} tab=${activeTab} focus=${focusArea} editing=${editingChannelField ?? "off"} consent=${pendingConsentPhone ? "pending" : "off"} pending=${pendingDispatchTarget ?? "none"} intro=${showIntro ? "on" : "off"}`,
+    );
+
     const isEnter = key.return || input === "\r" || input === "\n";
 
     if (showIntro) return;
@@ -1271,6 +1356,7 @@ export function HomeScreen() {
           return;
         }
 
+        dbg("home:roscoe", `action=${action.key}`);
         const result = applyRoscoeAction(roscoeSettings, action.key as RoscoeActionKey);
         saveRoscoeSettings(result.settings);
         if (action.key === "prevent-sleep" && typeof result.keepAwakeEnabled === "boolean") {
@@ -1308,6 +1394,7 @@ export function HomeScreen() {
 
       if (isEnter) {
         const action = channelActions[channelActionIndexRef.current]?.key;
+        dbg("home:channel", `action=${action ?? "none"}`);
         if (action === "route-hosted") {
           setChannelRoute("roscoe-hosted");
           return;
@@ -1341,9 +1428,6 @@ export function HomeScreen() {
         if (action === "hosted-checkout") {
           openHostedCheckout();
           return;
-        }
-        if (action === "hosted-link") {
-          linkHostedRelayCli();
         }
         return;
       }
@@ -1428,8 +1512,9 @@ export function HomeScreen() {
           accentColor="cyan"
           rightLabel="scanning"
         >
+          <Spinner label="Scanning installed providers..." />
           <Text dimColor>
-            Scanning installed providers now. Roscoe defers CLI help and MCP preflight checks until you open this tab so the app can render immediately at startup.
+            Roscoe scans provider CLI help and MCP preflight in the background after startup so this panel is usually ready by the time you open it.
           </Text>
         </Panel>
       )}
@@ -1479,13 +1564,16 @@ export function HomeScreen() {
             <Pill label={activeProvider.command} color="cyan" />
             <Pill label={activeProvider.preflight.headlessReady ? "headless ready" : "headless blocked"} color={activeProvider.preflight.headlessReady ? "green" : "red"} />
             <Pill label={activeProvider.preflight.mcpListReady ? "mcp ready" : "mcp unavailable"} color={activeProvider.preflight.mcpListReady ? "green" : "red"} />
-            <Pill label={activeProvider.preflight.serenaVisible ? "serena visible" : "serena missing"} color={activeProvider.preflight.serenaVisible ? "green" : "yellow"} />
+            <Pill
+              label={describeMcpServerCount(activeProvider.preflight.mcpServers.length)}
+              color={activeProvider.preflight.mcpServers.length > 0 ? "green" : "yellow"}
+            />
           </Box>
 
           <Box marginTop={1} flexDirection="column">
             <Text dimColor>{activeProvider.path ? `Binary: ${activeProvider.path}` : `${activeProvider.label} is not installed on this machine.`}</Text>
             <Text dimColor>
-              Preflight checks whether Roscoe can use this provider headlessly, whether <Text color="cyan">mcp list</Text> succeeds, and whether <Text color="cyan">serena</Text> appears in that provider's MCP registry.
+              Preflight checks whether Roscoe can use this provider headlessly, whether <Text color="cyan">mcp list</Text> succeeds, and which MCP servers this CLI instance reports locally. Roscoe does not install or manage MCP servers here.
             </Text>
             {activeProvider.preflight.mcpServers.length > 0 ? (
               <Text dimColor>
@@ -1514,6 +1602,12 @@ export function HomeScreen() {
             )}
             {activeProvider.id === "gemini" && (
               <Text dimColor>Gemini lanes use <Text color="cyan">--output-format stream-json</Text>, <Text color="cyan">--resume</Text>, and Roscoe's normal safe/accelerated execution mapping.</Text>
+            )}
+            {activeProvider.id === "qwen" && (
+              <Text dimColor>Qwen lanes use <Text color="cyan">--output-format stream-json</Text> with <Text color="cyan">--include-partial-messages</Text>. Roscoe maps safe mode to <Text color="cyan">--sandbox</Text>, accelerated mode drops sandbox, and turns run with <Text color="cyan">--approval-mode yolo</Text>.</Text>
+            )}
+            {activeProvider.id === "kimi" && (
+              <Text dimColor>Kimi lanes use <Text color="cyan">--print --output-format stream-json</Text>. Roscoe maps safe mode to <Text color="cyan">--plan</Text> and accelerated mode to normal print execution, while reasoning maps to Kimi's thinking toggles.</Text>
             )}
           </Box>
 
@@ -1551,16 +1645,6 @@ export function HomeScreen() {
                   {command.note ? <Text dimColor>{command.note}</Text> : null}
                 </Box>
               ))}
-            </Box>
-          )}
-
-          {activeProvider.extraFlags.length > 0 && (
-            <Box marginTop={1} flexDirection="column">
-              <Text dimColor>
-                <Text color="cyan">Detected in --help:</Text>
-                {" "}
-                {activeProvider.extraFlags.slice(0, 12).join(", ")}
-              </Text>
             </Box>
           )}
 
@@ -1631,7 +1715,10 @@ export function HomeScreen() {
             ) : null}
             {channelRoute === "roscoe-hosted" ? (
               <>
-                <Pill label="bidirectional" color="green" />
+                <Pill
+                  label={hostedRelayLinked ? "bidirectional ready" : hostedTestVerified ? "reply C to confirm" : "round trip pending"}
+                  color={hostedRelayLinked ? "green" : "yellow"}
+                />
                 <Pill label={hostedStatus?.active ? "subscription active" : hostedStatus?.subscriptionStatus ?? "subscription inactive"} color={hostedStatus?.active ? "green" : "yellow"} />
               </>
             ) : null}
@@ -1773,7 +1860,8 @@ export function HomeScreen() {
             ) : (
               <>
                 <Text dimColor>Roscoe-hosted uses roscoe.sh for inbound SMS and webhook delivery so your local machine does not need a public tunnel or local Twilio credentials.</Text>
-                <Text dimColor>Save your phone number, send a hosted test SMS, wait for delivery confirmation, then continue to checkout. Roscoe will activate the hosted relay for this CLI after billing is confirmed.</Text>
+                <Text dimColor>Save your phone number, send yourself a hosted test SMS, and reply C when it arrives so you can verify the round trip back into this CLI.</Text>
+                <Text dimColor>Checkout can open immediately once the phone number is saved, so billing no longer waits on the hosted test SMS.</Text>
                 {hostedStatus?.recordUpdatedAt ? <Text dimColor>Latest relay billing update: {hostedStatus.recordUpdatedAt}</Text> : null}
               </>
             )}
