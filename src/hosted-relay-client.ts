@@ -383,7 +383,7 @@ export class HostedRelayClient {
   }
 
   private handleServerMessage(raw: string): void {
-    let message: RelayServerToClientMessage | null = null;
+    let message: RelayServerToClientMessage;
     try {
       message = JSON.parse(raw) as RelayServerToClientMessage;
     } catch {

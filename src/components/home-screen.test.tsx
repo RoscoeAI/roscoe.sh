@@ -1532,9 +1532,11 @@ describe("HomeScreen", () => {
     expect(app.lastFrame()).toContain("Save a phone number before opening hosted checkout");
   });
 
-  it("sends a hosted test SMS and prompts for the round-trip reply", async () => {
+  it("sends a hosted test SMS after the Roscoe account is linked", async () => {
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
+    mocks.settings.notifications.hostedRelayAccessToken = "relay-access-token";
+    mocks.settings.notifications.hostedRelayLinkedPhone = "16122030386";
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/relay/billing/plans")) {
@@ -1558,13 +1560,6 @@ describe("HomeScreen", () => {
         return {
           ok: true,
           json: async () => ({ ok: true, sid: "SM123", status: "delivered", delivered: true, terminal: true, roundTripVerified: true }),
-        };
-      }
-      if (url.includes("/api/relay/billing/checkout-session")) {
-        expect(init?.method).toBe("POST");
-        return {
-          ok: true,
-          json: async () => ({ ok: true, url: "https://checkout.example/session" }),
         };
       }
       return {
@@ -1619,6 +1614,25 @@ describe("HomeScreen", () => {
   it("opens hosted checkout in the browser as soon as it is selected", async () => {
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
+    mocks.startHostedRelayDeviceLink.mockResolvedValue({
+      ok: true,
+      deviceCode: "DEVICE123",
+      verificationUrl: "https://roscoe.sh/link",
+      verificationUrlComplete: "https://roscoe.sh/link?device_code=DEVICE123",
+      expiresAt: "2026-04-04T12:00:00.000Z",
+      pollIntervalSeconds: 1,
+    });
+    mocks.pollHostedRelayDeviceLink.mockResolvedValue({
+      ok: true,
+      status: "linked",
+      accessToken: "linked-access-token",
+      accessTokenExpiresAt: "2026-04-04T12:15:00.000Z",
+      refreshToken: "linked-refresh-token",
+      refreshTokenExpiresAt: "2026-05-04T12:15:00.000Z",
+      phone: "16122030386",
+      clientId: "client-123",
+      userEmail: "tim@example.com",
+    });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/relay/billing/plans")) {
@@ -1636,13 +1650,6 @@ describe("HomeScreen", () => {
         return {
           ok: true,
           json: async () => ({ ok: true, status: { phone: "16122030386", subscriptionStatus: null, active: false } }),
-        };
-      }
-      if (url.includes("/api/relay/billing/checkout-session")) {
-        expect(init?.method).toBe("POST");
-        return {
-          ok: true,
-          json: async () => ({ ok: true, url: "https://checkout.example/session" }),
         };
       }
       return {
@@ -1670,10 +1677,16 @@ describe("HomeScreen", () => {
     await delay();
     await moveDownUntil(app, "› Checkout");
     app.stdin.write("\r");
-    await delay(80);
+    await delay(120);
 
-    expect(mocks.openExternalUrl).toHaveBeenCalledWith("https://checkout.example/session");
-    expect(app.lastFrame()).toContain("Opened hosted checkout in your browser.");
+    expect(mocks.startHostedRelayDeviceLink).toHaveBeenCalledWith("https://roscoe.sh", "16122030386", "client-123");
+    expect(mocks.openExternalUrl).toHaveBeenCalledWith("https://roscoe.sh/link?device_code=DEVICE123&intent=checkout");
+    expect(mocks.saveRoscoeSettings).toHaveBeenCalledWith(expect.objectContaining({
+      notifications: expect.objectContaining({
+        hostedRelayAccessToken: "linked-access-token",
+      }),
+    }));
+    expect(app.lastFrame()).toContain("Roscoe account linked");
   });
 
   it("arms self-hosted SMS and sends a local test text", async () => {
@@ -1759,6 +1772,8 @@ describe("HomeScreen", () => {
   it("surfaces hosted test SMS delivery failures without gating checkout", async () => {
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
+    mocks.settings.notifications.hostedRelayAccessToken = "relay-access-token";
+    mocks.settings.notifications.hostedRelayLinkedPhone = "16122030386";
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/relay/billing/plans")) {
@@ -1820,6 +1835,10 @@ describe("HomeScreen", () => {
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
     mocks.settings.notifications.hostedTestVerifiedPhone = "16122030386";
+    mocks.startHostedRelayDeviceLink.mockResolvedValue({
+      ok: false,
+      error: "Hosted relay auth is not configured.",
+    });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/relay/billing/plans")) {
@@ -1954,6 +1973,25 @@ describe("HomeScreen", () => {
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
     mocks.settings.notifications.hostedTestVerifiedPhone = "";
+    mocks.startHostedRelayDeviceLink.mockResolvedValue({
+      ok: true,
+      deviceCode: "DEVICE123",
+      verificationUrl: "https://roscoe.sh/link",
+      verificationUrlComplete: "https://roscoe.sh/link?device_code=DEVICE123",
+      expiresAt: "2026-04-04T12:00:00.000Z",
+      pollIntervalSeconds: 1,
+    });
+    mocks.pollHostedRelayDeviceLink.mockResolvedValue({
+      ok: true,
+      status: "linked",
+      accessToken: "linked-access-token",
+      accessTokenExpiresAt: "2026-04-04T12:15:00.000Z",
+      refreshToken: "linked-refresh-token",
+      refreshTokenExpiresAt: "2026-05-04T12:15:00.000Z",
+      phone: "16122030386",
+      clientId: "client-123",
+      userEmail: "tim@example.com",
+    });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/relay/billing/plans")) {
@@ -1968,13 +2006,6 @@ describe("HomeScreen", () => {
           json: async () => ({ ok: true, status: { phone: "16122030386", subscriptionStatus: null, active: false } }),
         };
       }
-      if (url.includes("/api/relay/billing/checkout-session")) {
-        expect(init?.method).toBe("POST");
-        return {
-          ok: true,
-          json: async () => ({ ok: true, url: "https://checkout.example/session" }),
-        };
-      }
       return {
         ok: false,
         json: async () => ({ error: "Unhandled fetch in test" }),
@@ -1987,10 +2018,10 @@ describe("HomeScreen", () => {
 
     await moveDownUntil(app, "› Checkout");
     app.stdin.write("\r");
-    await delay(80);
+    await delay(120);
 
-    expect(mocks.openExternalUrl).toHaveBeenCalledWith("https://checkout.example/session");
-    expect(app.lastFrame()).toContain("Opened hosted checkout in your browser.");
+    expect(mocks.openExternalUrl).toHaveBeenCalledWith("https://roscoe.sh/link?device_code=DEVICE123&intent=checkout");
+    expect(app.lastFrame()).toContain("Roscoe account linked");
   });
 
   it("re-verifies the same hosted phone by clearing the prior verification first", async () => {
@@ -1998,6 +2029,8 @@ describe("HomeScreen", () => {
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
     mocks.settings.notifications.hostedTestVerifiedPhone = "16122030386";
+    mocks.settings.notifications.hostedRelayAccessToken = "relay-access-token";
+    mocks.settings.notifications.hostedRelayLinkedPhone = "16122030386";
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/relay/billing/plans")) {
@@ -2048,6 +2081,8 @@ describe("HomeScreen", () => {
     mocks.settings.notifications.deliveryMode = "roscoe-hosted";
     mocks.settings.notifications.phoneNumber = "16122030386";
     mocks.settings.notifications.consentAcknowledged = true;
+    mocks.settings.notifications.hostedRelayAccessToken = "relay-access-token";
+    mocks.settings.notifications.hostedRelayLinkedPhone = "16122030386";
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/relay/billing/plans")) {

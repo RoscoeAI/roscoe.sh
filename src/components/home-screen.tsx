@@ -21,6 +21,7 @@ import type { SessionState } from "../types.js";
 import { setRoscoeKeepAwakeEnabled } from "../keep-awake.js";
 import { openExternalUrl } from "../open-url.js";
 import { dbg } from "../debug-log.js";
+import { pollHostedRelayDeviceLink, startHostedRelayDeviceLink } from "../hosted-relay-client.js";
 
 const HOME_TABS = [
   { label: "Dispatch Board", value: "dispatch" },
@@ -495,14 +496,10 @@ export function HomeScreen() {
             ? "Sending..."
             : hostedRelayLinked
               ? "Round trip ready"
-              : hostedTestVerified
-                ? "Reply C to confirm"
-                : "Ready",
+              : "Link account first",
           description: hostedRelayLinked
             ? "Press Enter to send another hosted round-trip test SMS."
-            : hostedTestVerified
-              ? "The test SMS delivered. Reply C when it arrives so you can verify the inbound path back into this CLI."
-              : "Press Enter to send a Roscoe-hosted test SMS. Reply C when it arrives so you can verify the round trip back into this CLI.",
+            : "Open Checkout first so roscoe.sh can link this CLI to a Roscoe account before you test the hosted round trip.",
         },
         {
           key: "hosted-checkout",
@@ -514,7 +511,7 @@ export function HomeScreen() {
               : "Loading pricing...",
           description: hostedStatus?.active
             ? "Subscription is already active for this phone."
-            : "Press Enter to open Stripe checkout in your browser and activate roscoe-hosted messaging.",
+            : "Press Enter to open roscoe.sh in your browser, sign in or create a Roscoe account, and continue checkout there.",
         },
         {
           key: "route-reset",
@@ -769,7 +766,7 @@ export function HomeScreen() {
     setChannelActionIndex(0);
     setWireMessage({
       text: nextRoute === "roscoe-hosted"
-        ? "Roscoe-hosted relay selected. Save a phone number, send a hosted test SMS, or open checkout whenever you're ready."
+        ? "Roscoe-hosted relay selected. Save a phone number, then open checkout to sign in or create a Roscoe account on roscoe.sh."
         : nextRoute === "self-hosted"
           ? "Self-hosted delivery selected. Gather the local env vars and save them in the active project's .env.local."
           : "Channel route cleared. Choose Roscoe-hosted or self-hosted to continue.",
@@ -934,6 +931,13 @@ export function HomeScreen() {
       setWireMessage({ text: "Accept SMS consent before sending a hosted test SMS.", color: "yellow" });
       return;
     }
+    if (!hostedRelayLinked) {
+      setWireMessage({
+        text: "Open Checkout first so roscoe.sh can link this CLI to your Roscoe account before you send a hosted test SMS.",
+        color: "yellow",
+      });
+      return;
+    }
 
     if (roscoeSettings.notifications.hostedTestVerifiedPhone === phone) {
       saveRoscoeSettings({
@@ -1002,27 +1006,98 @@ export function HomeScreen() {
     }
 
     setWireBusy(true);
-    setWireMessage({ text: "Creating hosted relay checkout...", color: "yellow" });
+    setWireMessage({ text: "Opening roscoe.sh hosted checkout...", color: "yellow" });
     const relayBaseUrl = getRelayBaseUrl();
-    requestHostedCheckoutSession(relayBaseUrl, phone, ensureHostedRelayClientId())
+    const clientId = ensureHostedRelayClientId();
+    startHostedRelayDeviceLink(relayBaseUrl, phone, clientId)
       .then(async (result) => {
-        maybePersistHostedRelayLink(result, phone);
+        if (!result.ok) {
+          throw new Error(result.error || "Unable to start Roscoe account checkout.");
+        }
+        if (!result.deviceCode) {
+          throw new Error("roscoe.sh did not return a device code for hosted checkout.");
+        }
+
+        const verificationUrl = result.verificationUrlComplete || result.verificationUrl;
+        if (!verificationUrl) {
+          throw new Error("roscoe.sh did not return a browser URL for hosted checkout.");
+        }
+
+        const setupUrl = new URL(verificationUrl);
+        setupUrl.searchParams.set("intent", "checkout");
+
         try {
-          await openExternalUrl(result.url);
+          await openExternalUrl(setupUrl.toString());
           setWireMessage({
-            text: "Opened hosted checkout in your browser.",
+            text: "Opened roscoe.sh in your browser. Sign in or create a Roscoe account there, then continue checkout.",
             color: "green",
           });
         } catch {
           setWireMessage({
-            text: `Hosted checkout ready: ${result.url}`,
+            text: `Continue hosted setup: ${setupUrl.toString()}`,
             color: "green",
           });
         }
+
+        void (async () => {
+          for (let attempt = 0; attempt < 90; attempt += 1) {
+            const pollResult = await pollHostedRelayDeviceLink(relayBaseUrl, result.deviceCode!, clientId);
+            if (!pollResult.ok) {
+              throw new Error(pollResult.error || "Unable to finish Roscoe account linking.");
+            }
+            if (pollResult.status === "linked") {
+              maybePersistHostedRelayLink(pollResult, phone);
+              setWireMessage({
+                text: "Roscoe account linked. Finish hosted checkout in your browser, then send the hosted test SMS.",
+                color: "green",
+              });
+              setWireRevision((value) => value + 1);
+              return;
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, (pollResult.pollIntervalSeconds || result.pollIntervalSeconds || 2) * 1000));
+          }
+        })().catch((error: unknown) => {
+          setWireMessage({
+            text: error instanceof Error ? error.message : "Hosted account approval is still pending in your browser.",
+            color: "yellow",
+          });
+        });
       })
       .catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : "Unable to start Roscoe account checkout.";
+        if (/Hosted relay (browser approval|auth) is not configured/i.test(detail)) {
+          requestHostedCheckoutSession(relayBaseUrl, phone, clientId)
+            .then(async (result) => {
+              maybePersistHostedRelayLink(result, phone);
+              try {
+                await openExternalUrl(result.url);
+                setWireMessage({
+                  text: "Opened hosted checkout in your browser.",
+                  color: "green",
+                });
+              } catch {
+                setWireMessage({
+                  text: `Hosted checkout ready: ${result.url}`,
+                  color: "green",
+                });
+              }
+            })
+            .catch((fallbackError: unknown) => {
+              setWireMessage({
+                text: fallbackError instanceof Error ? fallbackError.message : "Failed to create hosted relay checkout session.",
+                color: "red",
+              });
+            })
+            .finally(() => {
+              setWireBusy(false);
+              setWireRevision((value) => value + 1);
+            });
+          return;
+        }
+
         setWireMessage({
-          text: error instanceof Error ? error.message : "Failed to create hosted relay checkout session.",
+          text: detail,
           color: "red",
         });
       })
