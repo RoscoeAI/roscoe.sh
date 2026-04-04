@@ -1,11 +1,12 @@
-import { execFileSync } from "child_process";
+import { execFile, execFileSync, type ExecFileOptionsWithStringEncoding } from "child_process";
 import { mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import type { RoscoeSettings } from "./config.js";
+import { dbg } from "./debug-log.js";
 import { detectProtocol, getProviderAdapter, isLLMProtocol, type LLMProtocol } from "./llm-runtime.js";
 
-export type ProviderId = "claude" | "codex" | "gemini";
+export type ProviderId = LLMProtocol;
 
 export interface ProviderToggleDescriptor {
   key: string;
@@ -26,7 +27,6 @@ export interface ProviderSessionCommandDescriptor {
 export interface ProviderPreflightStatus {
   headlessReady: boolean;
   mcpListReady: boolean;
-  serenaVisible: boolean;
   mcpServers: string[];
   note: string | null;
 }
@@ -45,16 +45,31 @@ export interface DiscoveredProvider {
   preflight: ProviderPreflightStatus;
 }
 
+export interface InstalledProvider {
+  id: ProviderId;
+  label: string;
+  command: string;
+  installed: boolean;
+  path: string | null;
+  comingSoon: boolean;
+}
+
 const PROVIDER_SPECS: Array<{ id: ProviderId; label: string; command: string; comingSoon: boolean }> = [
   { id: "claude", label: "Claude", command: "claude", comingSoon: false },
   { id: "codex", label: "Codex", command: "codex", comingSoon: false },
+  { id: "qwen", label: "Qwen", command: "qwen", comingSoon: false },
+  { id: "kimi", label: "Kimi", command: "kimi", comingSoon: false },
   { id: "gemini", label: "Gemini", command: "gemini", comingSoon: false },
 ];
 
+let installedProviderCache: InstalledProvider[] | null = null;
 let providerCache: DiscoveredProvider[] | null = null;
+let providerCachePromise: Promise<DiscoveredProvider[]> | null = null;
 
 export function resetProviderRegistryCacheForTests(): void {
+  installedProviderCache = null;
   providerCache = null;
+  providerCachePromise = null;
 }
 
 function extractHelpFlags(helpText: string): string[] {
@@ -63,49 +78,45 @@ function extractHelpFlags(helpText: string): string[] {
 }
 
 function ensureProviderSupportDir(providerId: ProviderId): void {
-  if (providerId !== "gemini") return;
+  if (providerId !== "gemini" && providerId !== "kimi") return;
 
   try {
-    mkdirSync(join(homedir(), ".gemini"), { recursive: true });
+    mkdirSync(join(homedir(), providerId === "kimi" ? ".kimi" : ".gemini"), { recursive: true });
   } catch {
     // Best effort only. If this fails, let normal provider discovery continue.
   }
 }
 
-function detectProvider(spec: { id: ProviderId; label: string; command: string; comingSoon: boolean }): DiscoveredProvider {
-  let path: string | null = null;
-  let helpText = "";
+function locateProviderPath(command: string): string | null {
   const locator = process.platform === "win32" ? "where.exe" : "which";
 
   try {
-    path = execFileSync(locator, [spec.command], {
+    return execFileSync(locator, [command], {
       encoding: "utf-8",
       timeout: 1500,
       stdio: ["ignore", "pipe", "ignore"],
     }).trim().split(/\r?\n/)[0]?.trim() || null;
   } catch {
-    path = null;
+    return null;
   }
+}
 
-  if (path) {
-    ensureProviderSupportDir(spec.id);
-
-    try {
-      helpText = execFileSync(path, ["--help"], {
-        encoding: "utf-8",
-        timeout: 2500,
-        maxBuffer: 512 * 1024,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (error) {
-      const typed = error as { stdout?: string; stderr?: string };
-      helpText = `${typed.stdout ?? ""}\n${typed.stderr ?? ""}`.trim();
-    }
+function readProviderHelp(path: string): string {
+  try {
+    return execFileSync(path, ["--help"], {
+      encoding: "utf-8",
+      timeout: 2500,
+      maxBuffer: 512 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    const typed = error as { stdout?: string; stderr?: string };
+    return `${typed.stdout ?? ""}\n${typed.stderr ?? ""}`.trim();
   }
+}
 
-  const helpFlags = extractHelpFlags(helpText);
-  const isInstalled = path !== null;
-  const managedToggles: ProviderToggleDescriptor[] = spec.id === "codex"
+function buildManagedToggles(spec: { id: ProviderId }, helpFlags: string[]): ProviderToggleDescriptor[] {
+  return spec.id === "codex"
     ? [
         {
           key: "webSearch",
@@ -140,7 +151,10 @@ function detectProvider(spec: { id: ProviderId; label: string; command: string; 
           },
         ]
       : [];
-  const sessionCommands: ProviderSessionCommandDescriptor[] = spec.id === "codex"
+  }
+
+function buildSessionCommands(spec: { id: ProviderId }): ProviderSessionCommandDescriptor[] {
+  return spec.id === "codex"
     ? [
         {
           command: "/fast",
@@ -151,16 +165,25 @@ function detectProvider(spec: { id: ProviderId; label: string; command: string; 
         },
       ]
     : [];
+}
+
+function buildDiscoveredProvider(
+  spec: InstalledProvider,
+  helpText: string,
+  preflight: ProviderPreflightStatus,
+): DiscoveredProvider {
+  const helpFlags = extractHelpFlags(helpText);
+  const managedToggles = buildManagedToggles(spec, helpFlags);
+  const sessionCommands = buildSessionCommands(spec);
   const managedFlagNames = new Set(managedToggles.map((toggle) => toggle.flag.toLowerCase()));
   const extraFlags = helpFlags.filter((flag) => !managedFlagNames.has(flag));
-  const preflight = detectProviderPreflight(spec, path, helpText, helpFlags);
 
   return {
     id: spec.id,
     label: spec.label,
     command: spec.command,
-    installed: isInstalled,
-    path,
+    installed: spec.installed,
+    path: spec.path,
     comingSoon: spec.comingSoon,
     helpFlags,
     managedToggles,
@@ -168,6 +191,34 @@ function detectProvider(spec: { id: ProviderId; label: string; command: string; 
     extraFlags,
     preflight,
   };
+}
+
+function detectInstalledProvider(spec: { id: ProviderId; label: string; command: string; comingSoon: boolean }): InstalledProvider {
+  const path = locateProviderPath(spec.command);
+  return {
+    id: spec.id,
+    label: spec.label,
+    command: spec.command,
+    installed: path !== null,
+    path,
+    comingSoon: spec.comingSoon,
+  };
+}
+
+function detectProvider(spec: InstalledProvider): DiscoveredProvider {
+  if (!spec.path) {
+    return buildDiscoveredProvider(spec, "", {
+      headlessReady: false,
+      mcpListReady: false,
+      mcpServers: [],
+      note: `${spec.label} is not installed on this machine.`,
+    });
+  }
+
+  ensureProviderSupportDir(spec.id);
+  const helpText = readProviderHelp(spec.path);
+  const preflight = detectProviderPreflight(spec, spec.path, helpText, extractHelpFlags(helpText));
+  return buildDiscoveredProvider(spec, helpText, preflight);
 }
 
 function detectProviderPreflight(
@@ -180,7 +231,6 @@ function detectProviderPreflight(
     return {
       headlessReady: false,
       mcpListReady: false,
-      serenaVisible: false,
       mcpServers: [],
       note: `${spec.label} is not installed on this machine.`,
     };
@@ -192,7 +242,6 @@ function detectProviderPreflight(
   return {
     headlessReady,
     mcpListReady: mcpOutput.ok,
-    serenaVisible: /\bserena\b/i.test(mcpOutput.output),
     mcpServers: parseMcpServerNames(spec.id, mcpOutput.output),
     note: mcpOutput.note,
   };
@@ -201,6 +250,18 @@ function detectProviderPreflight(
 function detectHeadlessReady(providerId: ProviderId, helpText: string, helpFlags: string[]): boolean {
   if (providerId === "codex") {
     return helpText.includes("Run Codex non-interactively");
+  }
+  if (providerId === "kimi") {
+    return helpFlags.includes("--print")
+      && helpFlags.includes("--output-format")
+      && (
+        helpFlags.includes("--resume")
+        || helpFlags.includes("--session")
+        || /\s-r(?:[\s,]|$)/.test(helpText)
+      );
+  }
+  if (providerId === "qwen") {
+    return helpFlags.includes("--output-format") && helpFlags.includes("--resume");
   }
   return helpFlags.includes("--output-format") && helpFlags.includes("--resume");
 }
@@ -238,17 +299,16 @@ function extractProviderPreflightNote(providerId: ProviderId, output: string): s
     .filter(Boolean);
 
   if (providerId === "gemini") {
-    const keychainWarning = lines.find((line) => /keychain|fallback/i.test(line));
-    if (keychainWarning) return keychainWarning;
-  }
+    const keytarMissing = lines.find((line) => /keychain initialization encountered an error|cannot find module .*keytar/i.test(line));
+    const fileFallback = lines.find((line) => /filekeychain fallback|fallback for secure storage/i.test(line));
+    const cachedCredentials = lines.find((line) => /loaded cached credentials/i.test(line));
 
-  if (providerId === "claude") {
-    const healthLine = lines.find((line) => /^checking mcp server health/i.test(line));
-    if (healthLine) return healthLine;
-  }
-
-  if (/No MCP servers configured\./i.test(output)) {
-    return "No MCP servers configured.";
+    if (keytarMissing || fileFallback) {
+      return "Gemini could not load its keychain bridge, so it fell back to file-backed credentials.";
+    }
+    if (cachedCredentials) {
+      return "Gemini loaded cached credentials.";
+    }
   }
 
   return null;
@@ -277,7 +337,22 @@ function parseMcpServerNames(providerId: ProviderId, output: string): string[] {
   if (providerId === "gemini") {
     if (/No MCP servers configured\./i.test(output)) return [];
     return lines
-      .filter((line) => !/keychain|loaded cached credentials/i.test(line))
+      .filter((line) => !/keychain|fallback|loaded cached credentials/i.test(line))
+      .map((line) => line.match(/^[-*]?\s*([A-Za-z0-9._-]+)/)?.[1] ?? null)
+      .filter((line): line is string => Boolean(line));
+  }
+
+  if (providerId === "kimi") {
+    if (/No MCP servers configured\./i.test(output)) return [];
+    return lines
+      .filter((line) => !/^MCP config file:/i.test(line))
+      .map((line) => line.match(/^[-*]?\s*([A-Za-z0-9._-]+)/)?.[1] ?? null)
+      .filter((line): line is string => Boolean(line));
+  }
+
+  if (providerId === "qwen") {
+    if (/No MCP servers configured\./i.test(output)) return [];
+    return lines
       .map((line) => line.match(/^[-*]?\s*([A-Za-z0-9._-]+)/)?.[1] ?? null)
       .filter((line): line is string => Boolean(line));
   }
@@ -285,10 +360,106 @@ function parseMcpServerNames(providerId: ProviderId, output: string): string[] {
   return [];
 }
 
+function execFileCapture(
+  command: string,
+  args: string[],
+  options: ExecFileOptionsWithStringEncoding,
+): Promise<{ ok: boolean; stdout: string; stderr: string; message: string | null }> {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    dbg("providers:exec", `status=start command=${command} args=${args.join(" ")}`);
+    execFile(command, args, options, (error, stdout, stderr) => {
+      dbg(
+        "providers:exec",
+        `status=done command=${command} args=${args.join(" ")} ok=${!error} ms=${Date.now() - startedAt} signal=${error?.signal ?? "none"} message=${error?.message ?? "none"}`,
+      );
+      resolve({
+        ok: !error,
+        stdout,
+        stderr,
+        message: error ? error.message : null,
+      });
+    });
+  });
+}
+
+async function runProviderMcpListAsync(path: string, providerId: ProviderId): Promise<{ ok: boolean; output: string; note: string | null }> {
+  ensureProviderSupportDir(providerId);
+  const result = await execFileCapture(path, ["mcp", "list"], {
+    encoding: "utf-8",
+    timeout: 5000,
+    maxBuffer: 512 * 1024,
+  });
+  const output = `${result.stdout}\n${result.stderr}`.trim();
+  return {
+    ok: result.ok,
+    output,
+    note: result.ok
+      ? extractProviderPreflightNote(providerId, output)
+      : output || result.message || "MCP preflight failed.",
+  };
+}
+
+async function detectProviderAsync(spec: InstalledProvider): Promise<DiscoveredProvider> {
+  dbg("providers", `status=start provider=${spec.id} installed=${spec.installed} path=${spec.path ?? "missing"}`);
+  if (!spec.path) {
+    dbg("providers", `status=done provider=${spec.id} installed=false`);
+    return buildDiscoveredProvider(spec, "", {
+      headlessReady: false,
+      mcpListReady: false,
+      mcpServers: [],
+      note: `${spec.label} is not installed on this machine.`,
+    });
+  }
+
+  ensureProviderSupportDir(spec.id);
+  const helpResult = await execFileCapture(spec.path, ["--help"], {
+    encoding: "utf-8",
+    timeout: 2500,
+    maxBuffer: 512 * 1024,
+  });
+  const helpText = helpResult.ok
+    ? helpResult.stdout
+    : `${helpResult.stdout}\n${helpResult.stderr}`.trim();
+  const helpFlags = extractHelpFlags(helpText);
+  const mcpOutput = await runProviderMcpListAsync(spec.path, spec.id);
+  const discovered = buildDiscoveredProvider(spec, helpText, {
+    headlessReady: detectHeadlessReady(spec.id, helpText, helpFlags),
+    mcpListReady: mcpOutput.ok,
+    mcpServers: parseMcpServerNames(spec.id, mcpOutput.output),
+    note: mcpOutput.note,
+  });
+  dbg(
+    "providers",
+    `status=done provider=${spec.id} installed=true headless=${discovered.preflight.headlessReady} mcp=${discovered.preflight.mcpListReady} servers=${discovered.preflight.mcpServers.length}`,
+  );
+  return discovered;
+}
+
+export function discoverInstalledProviders(): InstalledProvider[] {
+  if (installedProviderCache) return installedProviderCache;
+  installedProviderCache = PROVIDER_SPECS.map(detectInstalledProvider);
+  return installedProviderCache;
+}
+
 export function discoverProviders(): DiscoveredProvider[] {
   if (providerCache) return providerCache;
-  providerCache = PROVIDER_SPECS.map(detectProvider);
+  providerCache = discoverInstalledProviders().map(detectProvider);
   return providerCache;
+}
+
+export async function discoverProvidersAsync(): Promise<DiscoveredProvider[]> {
+  if (providerCache) return providerCache;
+  if (providerCachePromise) return providerCachePromise;
+  providerCachePromise = Promise.all(discoverInstalledProviders().map(detectProviderAsync))
+    .then((providers) => {
+      providerCache = providers;
+      return providers;
+    })
+    .finally(() => {
+      providerCachePromise = null;
+    });
+  return providerCachePromise;
 }
 
 export function getProviderLabel(provider: ProviderId | LLMProtocol): string {
@@ -299,7 +470,7 @@ export function getSelectableProviderIds(
   settings: RoscoeSettings,
   include: LLMProtocol[] = [],
 ): LLMProtocol[] {
-  const installedSupportedProviders = discoverProviders()
+  const installedSupportedProviders = discoverInstalledProviders()
     .filter((provider) => provider.installed && !provider.comingSoon && isLLMProtocol(provider.id))
     .map((provider) => provider.id);
   const enabled = installedSupportedProviders.filter((provider) => settings.providers[provider].enabled);
@@ -311,7 +482,7 @@ export function getSelectableProviderIds(
   );
   if (merged.length > 0) return merged;
   if (installedSupportedProviders.length > 0) return installedSupportedProviders;
-  return include.length > 0 ? Array.from(new Set(include)) : ["claude", "codex"];
+  return include.length > 0 ? Array.from(new Set(include)) : ["claude", "codex", "qwen", "gemini", "kimi"];
 }
 
 export function filterProfilesBySelectableProviders(

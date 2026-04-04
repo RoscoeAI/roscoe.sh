@@ -39,7 +39,7 @@ describe("home-screen helpers", () => {
       terminal: true,
       status: "delivered",
     })).toEqual({
-      text: "Hosted relay test SMS delivered to 6122030386. Checkout is now unlocked for this phone.",
+      text: "Hosted relay test SMS delivered to 6122030386. Reply C to verify the round trip back into this CLI.",
       color: "green",
     });
 
@@ -50,7 +50,7 @@ describe("home-screen helpers", () => {
       status: "undelivered",
       errorMessage: "carrier blocked",
     })).toEqual({
-      text: "Hosted relay test SMS did not deliver (undelivered). carrier blocked Checkout remains locked until delivery is confirmed.",
+      text: "Hosted relay test SMS did not deliver (undelivered). carrier blocked",
       color: "red",
     });
 
@@ -60,7 +60,7 @@ describe("home-screen helpers", () => {
       terminal: false,
       status: null,
     })).toEqual({
-      text: "Hosted relay test SMS submitted to Twilio for 6122030386 (queued). Delivery is not confirmed yet, so checkout remains locked.",
+      text: "Hosted relay test SMS submitted to Twilio for 6122030386 (queued). Reply C when it arrives to verify the round trip.",
       color: "yellow",
     });
   });

@@ -1037,6 +1037,8 @@ describe("HomeScreen", () => {
     expect(app.lastFrame()).toContain("Gemini");
     expect(app.lastFrame()).toContain("headless ready");
     expect(app.lastFrame()).toContain("mcp ready");
+    expect(app.lastFrame()).not.toContain("/fast");
+    expect(app.lastFrame()).not.toContain("Session Commands");
 
     app.stdin.write("\u001B[C");
     await delay();
@@ -2193,7 +2195,7 @@ describe("HomeScreen", () => {
 
   it("renders provider scanning and no-provider states when discovery changes", async () => {
     let resolveProviders: ((value: any[]) => void) | null = null;
-    mocks.discoverProviders.mockImplementationOnce(() => new Promise((resolve) => {
+    mocks.discoverProviders.mockImplementationOnce(() => new Promise<any[]>((resolve) => {
       resolveProviders = resolve;
     }));
 
@@ -2204,7 +2206,11 @@ describe("HomeScreen", () => {
     await delay();
     expect(app.lastFrame()).toContain("scanning");
 
-    resolveProviders?.([]);
+    if (!resolveProviders) {
+      throw new Error("Provider resolver was not captured for the scanning-state test.");
+    }
+    const resolvePendingProviders = resolveProviders as (value: any[]) => void;
+    resolvePendingProviders([]);
     await delay(50);
     expect(app.lastFrame()).toContain("none detected");
     expect(app.lastFrame()).toContain("No supported providers were detected on this machine.");

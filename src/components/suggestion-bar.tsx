@@ -4,9 +4,12 @@ import { Spinner, Badge } from "@inkjs/ui";
 import { PreviewState, SessionStatus, SuggestionPhase } from "../types.js";
 import { renderMd } from "../render-md.js";
 import { KeyHints, Panel, Pill } from "./chrome.js";
-import { formatRoscoeDraftDisplayText, normalizeRoscoeDraftMessage } from "../roscoe-draft.js";
+import { formatRoscoeDraftDisplayText, inferRoscoeDecision, normalizeRoscoeDraftMessage } from "../roscoe-draft.js";
 import { getPreviewState } from "../session-preview.js";
 import { CommandTextInput } from "./command-text-input.js";
+
+const GENERATING_PARTIAL_MAX_CHARS = 240;
+const GENERATING_PARTIAL_MAX_LINES = 3;
 
 function isPermissionBlockedSummary(summary: string | null): boolean {
   if (!summary) return false;
@@ -41,9 +44,13 @@ interface SuggestionBarProps {
 function GeneratingView({ partial }: { partial?: string }) {
   const rendered = useMemo(() => {
     if (!partial) return "";
-    // Show the tail of partial text, rendered as markdown
-    const tail = partial.length > 500 ? partial.slice(-500) : partial;
-    return renderMd(tail);
+    const tail = partial.length > GENERATING_PARTIAL_MAX_CHARS
+      ? partial.slice(-GENERATING_PARTIAL_MAX_CHARS)
+      : partial;
+    return renderMd(tail)
+      .split("\n")
+      .slice(-GENERATING_PARTIAL_MAX_LINES)
+      .join("\n");
   }, [partial]);
 
   return (
@@ -77,13 +84,23 @@ export function SuggestionBar({
   const previewState = getPreviewState(preview);
   const readyText = phase.kind === "ready" ? normalizeRoscoeDraftMessage(phase.result.text).trim() : "";
   const readyIsHold = phase.kind === "ready" && !readyText;
-  const readyNeedsReview = phase.kind === "ready" && (!autoMode || phase.result.confidence < autoSendThreshold);
+  const readyDecision = phase.kind === "ready"
+    ? inferRoscoeDecision({
+        decision: phase.result.decision,
+        message: phase.result.text,
+        reasoning: phase.result.reasoning,
+      })
+    : null;
+  const readyExplicitReview = readyDecision === "needs-review" && !readyIsHold;
+  const readyNeedsReview = phase.kind === "ready" && (readyExplicitReview || !autoMode || phase.result.confidence < autoSendThreshold);
   const readyWillAutoAct = phase.kind === "ready" && autoMode && !readyNeedsReview;
   const subtitle = phase.kind === "ready"
     ? readyNeedsReview
-      ? autoMode
-        ? `AUTO is on, but this draft is below the ${autoSendThreshold}/100 send threshold and still needs review.`
-        : "Roscoe drafted the next message to send to the Guild. Manual approval is enabled."
+      ? readyExplicitReview
+        ? "AUTO is on, but Roscoe marked this draft for review before anything is sent."
+        : autoMode
+          ? `AUTO is on, but this draft is below the ${autoSendThreshold}/100 send threshold and still needs review.`
+          : "Roscoe drafted the next message to send to the Guild. Manual approval is enabled."
       : readyIsHold
         ? "AUTO is on. Roscoe is holding the Guild reply unless you override it."
         : "AUTO is on. Roscoe will send this to the Guild unless you override it."
@@ -105,7 +122,7 @@ export function SuggestionBar({
       : 6;
   const readyPillLabel = phase.kind === "ready"
     ? readyNeedsReview
-      ? autoMode ? "needs review" : "approval required"
+      ? readyExplicitReview ? "review draft" : autoMode ? "needs review" : "approval required"
       : readyIsHold ? "auto hold" : "auto send"
     : null;
   const readyHints = phase.kind === "ready"
@@ -172,6 +189,7 @@ export function SuggestionBar({
       rightLabel={showingPreview ? previewState.mode : showingPaused ? "paused" : showingBlocked ? "blocked" : showingParked ? "parked" : showingWaiting ? "waiting" : toolActivity ? `tool ${toolActivity}` : phase.kind}
       accentColor={showingPreview ? "magenta" : showingPaused || showingBlocked ? "yellow" : showingParked || showingWaiting ? "blue" : phase.kind === "error" ? "red" : phase.kind === "ready" ? "yellow" : phase.kind === "manual-input" || phase.kind === "editing" ? "magenta" : "gray"}
       minHeight={showingPreview ? 7 : minHeight}
+      height={phase.kind === "generating" ? minHeight : undefined}
       flexShrink={0}
     >
       {showingPreview && (

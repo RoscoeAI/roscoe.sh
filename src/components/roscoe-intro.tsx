@@ -2,54 +2,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Box, Text, useInput } from "ink";
 
 const WORD = "ROSCOE";
-const LETTER_TICK_MS = 60;
+const FRAME_TICK_MS = 100;
 const TAGLINE = "Autopilot for Claude & Codex CLIs";
-const RAIL_WIDTH = 34;
-const WHEEL_FRAMES = ["-*-", "\\|/", "-+-", "/|\\"];
-const HEAD_FRAMES = [
-  ["     ____     ", " ___/ __ \\___ ", "[___|_[]_|___]", "    /_||_\\    "],
-  ["     ____     ", " ___/ __ \\___ ", "[___|_oo_|___]", "   _/_||_\\_   "],
-  ["    _====_    ", " __/ /__\\ \\__ ", "[___|####|___]", "   _/_||_\\_   "],
-  ["     ____     ", " ___/____\\___ ", "[___|====|___]", "    \\_||_/    "],
-] as const;
-const SPIN_FRAMES = [
-  [
-    "  ||  ",
-    "  ||  ",
-    "  ||  ",
-    "  ||  ",
-    "  ||  ",
-  ],
-  [
-    "  /\\  ",
-    " //|  ",
-    "</||> ",
-    "  |\\\\ ",
-    "  \\/  ",
-  ],
-  [
-    " .--. ",
-    "/_[]_\\",
-    "|====|",
-    "|_[]_|",
-    " '--' ",
-  ],
-  [
-    "  /\\  ",
-    "  |\\\\ ",
-    " <||\\>",
-    " //|  ",
-    "  \\/  ",
-  ],
-  [
-    "  ||  ",
-    " /||  ",
-    "  ||  ",
-    "  ||\\ ",
-    "  ||  ",
-  ],
-] as const;
-const LETTER_PHASE_TICKS = SPIN_FRAMES.length + 1;
+const FRAME_WIDTH = 80;
+const FRAME_HEIGHT = 24;
+const LETTER_PHASE_TICKS = 4;
 
 const LETTER_ART: Record<string, string[]> = {
   R: [
@@ -89,6 +46,30 @@ const LETTER_ART: Record<string, string[]> = {
   ],
 };
 
+const BRAND_FRAMES = [
+  [
+    "      ",
+    "  ..  ",
+    " .... ",
+    "  ..  ",
+    "      ",
+  ],
+  [
+    "      ",
+    "  ::  ",
+    " :::: ",
+    "  ::  ",
+    "      ",
+  ],
+  [
+    "      ",
+    "  ||  ",
+    " |||| ",
+    "  ||  ",
+    "      ",
+  ],
+] as const;
+
 const BLANK_LETTER = [
   "      ",
   "      ",
@@ -97,44 +78,172 @@ const BLANK_LETTER = [
   "      ",
 ];
 
+const WHEEL_TEMPLATE = [
+  "  /----\\  ",
+  " /      \\ ",
+  "/        \\",
+  "|        |",
+  "|        |",
+  "|        |",
+  "|        |",
+  "\\        /",
+  " \\      / ",
+  "  \\----/  ",
+] as const;
+
+const WHEEL_TOP = 7;
+const WHEEL_LEFT = 28;
+const WHEEL_CENTER_ROW = WHEEL_TOP + 4;
+const WHEEL_CENTER_COL = WHEEL_LEFT + 4;
+const BUCKET_SLOTS = [
+  { row: 2, col: 4 },
+  { row: 3, col: 6 },
+  { row: 4, col: 7 },
+  { row: 6, col: 6 },
+  { row: 7, col: 4 },
+  { row: 6, col: 2 },
+  { row: 4, col: 1 },
+  { row: 3, col: 2 },
+] as const;
+
+function createCanvas(): string[][] {
+  return Array.from({ length: FRAME_HEIGHT }, () => Array.from({ length: FRAME_WIDTH }, () => " "));
+}
+
+function writeText(canvas: string[][], row: number, col: number, text: string): void {
+  if (row < 0 || row >= FRAME_HEIGHT) return;
+  for (let index = 0; index < text.length; index += 1) {
+    const targetCol = col + index;
+    if (targetCol < 0 || targetCol >= FRAME_WIDTH) continue;
+    canvas[row][targetCol] = text[index];
+  }
+}
+
+function writeTransparent(canvas: string[][], row: number, col: number, text: string): void {
+  if (row < 0 || row >= FRAME_HEIGHT) return;
+  for (let index = 0; index < text.length; index += 1) {
+    const targetCol = col + index;
+    if (targetCol < 0 || targetCol >= FRAME_WIDTH) continue;
+    if (text[index] !== " ") {
+      canvas[row][targetCol] = text[index];
+    }
+  }
+}
+
+function renderCanvas(canvas: string[][]): string[] {
+  return canvas.map((row) => row.join(""));
+}
+
+function buildSpokes(phase: number): Array<{ row: number; col: number; char: string }> {
+  switch (phase % 4) {
+    case 0:
+      return [
+        { row: 3, col: 4, char: "|" },
+        { row: 5, col: 4, char: "|" },
+        { row: 4, col: 3, char: "-" },
+        { row: 4, col: 5, char: "-" },
+      ];
+    case 1:
+      return [
+        { row: 3, col: 3, char: "\\" },
+        { row: 5, col: 5, char: "\\" },
+        { row: 3, col: 5, char: "/" },
+        { row: 5, col: 3, char: "/" },
+      ];
+    case 2:
+      return [
+        { row: 2, col: 4, char: "|" },
+        { row: 6, col: 4, char: "|" },
+        { row: 4, col: 2, char: "-" },
+        { row: 4, col: 6, char: "-" },
+      ];
+    default:
+      return [
+        { row: 2, col: 2, char: "\\" },
+        { row: 6, col: 6, char: "\\" },
+        { row: 2, col: 6, char: "/" },
+        { row: 6, col: 2, char: "/" },
+      ];
+  }
+}
+
+function buildMillFrame(phase: number): string[] {
+  const canvas = createCanvas();
+
+  writeText(canvas, 0, 0, "~~~~≈≈≈≈≈≈~~~~≈≈≈≈≈≈~~~~≈≈≈≈≈~~~~");
+  writeText(canvas, 1, 0, "≈≈≈≈~~~~≈≈≈≈≈≈~~~~≈≈≈≈≈≈~~~~≈≈≈≈");
+  writeText(canvas, 2, 0, "~~~~≈≈≈≈≈≈~~~~≈≈≈≈≈≈~~~~≈≈≈≈≈~~~~");
+  writeText(canvas, 3, 0, "≈≈≈≈~~~~≈≈≈≈≈≈~~~~≈≈≈≈≈≈~~~~≈≈≈≈");
+
+  writeText(canvas, 4, 12, "[=======][=======][=======]");
+  writeText(canvas, 5, 34, "||");
+  writeText(canvas, 6, 35, "||");
+
+  WHEEL_TEMPLATE.forEach((line, index) => {
+    writeText(canvas, WHEEL_TOP + index, WHEEL_LEFT, line);
+  });
+
+  for (const spoke of buildSpokes(phase)) {
+    canvas[WHEEL_TOP + spoke.row][WHEEL_LEFT + spoke.col] = spoke.char;
+  }
+
+  canvas[WHEEL_CENTER_ROW][WHEEL_CENTER_COL] = "+";
+
+  for (let slot = 0; slot < 4; slot += 1) {
+    const bucket = BUCKET_SLOTS[(phase + slot * 2) % BUCKET_SLOTS.length];
+    const bucketChar = (phase + slot) % 2 === 0 ? "U" : "V";
+    canvas[WHEEL_TOP + bucket.row][WHEEL_LEFT + bucket.col] = bucketChar;
+  }
+
+  const fallCol = 37 + Math.floor((phase % 2));
+  const fallChars = [".", ",", ":", "|"];
+  for (let row = 5; row <= 11; row += 1) {
+    canvas[row][fallCol] = fallChars[(phase + row) % fallChars.length];
+  }
+
+  canvas[15][36] = ".";
+  canvas[16][37] = ",";
+  canvas[17][38] = ":";
+  canvas[18][39] = "|";
+
+  writeText(canvas, 5, 56, "      XXXXXXXXXXXXXX");
+  writeText(canvas, 6, 55, "     XXX XXXXXX X XXX");
+  writeText(canvas, 7, 56, "####################");
+  writeText(canvas, 8, 56, "##      [ ]       ##");
+  writeText(canvas, 9, 56, "##                ##");
+  writeText(canvas, 10, 56, "##      ____      ##");
+  writeText(canvas, 11, 56, "##     | __ |     ##");
+  writeText(canvas, 12, 56, "##     ||  ||     ##");
+  writeText(canvas, 13, 56, "##     ||__||     ##");
+  writeText(canvas, 14, 56, "##                ##");
+  writeText(canvas, 15, 56, "####################");
+
+  writeText(canvas, 17, 22, "________________________________________________________");
+  writeText(canvas, 18, 22, "_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _");
+  writeText(canvas, 19, 36, "~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~");
+  writeText(canvas, 20, 42, `~ ${fallChars[phase % fallChars.length]} ~ ${fallChars[(phase + 2) % fallChars.length]} ~ ~ ~`);
+  writeText(canvas, 21, 49, "~ ~ ~ ~ ~ ~ ~ ~ ~");
+
+  writeTransparent(canvas, 22, 2, "             ");
+  writeTransparent(canvas, 23, 2, "             ");
+
+  return renderCanvas(canvas);
+}
+
+export function buildMillFrames(): string[][] {
+  return Array.from({ length: 8 }, (_, phase) => buildMillFrame(phase));
+}
+
 export function buildRoscoeWordmark(revealCount: number, activeSpinPhase: number | null = null): string[] {
   const letters = WORD.split("").map((letter, index) => {
     if (index < revealCount) return LETTER_ART[letter];
     if (index === revealCount && activeSpinPhase !== null) {
-      return SPIN_FRAMES[Math.min(activeSpinPhase, SPIN_FRAMES.length - 1)];
+      return BRAND_FRAMES[Math.min(activeSpinPhase, BRAND_FRAMES.length - 1)];
     }
     return BLANK_LETTER;
   });
-  return Array.from({ length: BLANK_LETTER.length }, (_, row) =>
-    letters.map((art) => art[row]).join(" "),
-  );
-}
 
-export function buildPulseRail(width: number, tick: number): string {
-  const chars = Array.from({ length: Math.max(6, width) }, () => "=");
-  const step = Math.floor(tick / 2) % chars.length;
-  const mirror = chars.length - 1 - step;
-  chars[step] = "o";
-  chars[mirror] = "o";
-  return chars.join("");
-}
-
-function placeGlyph(width: number, center: number, glyph: string): string {
-  const safeWidth = Math.max(glyph.length + 2, width);
-  const start = Math.max(0, Math.min(safeWidth - glyph.length, center - Math.floor(glyph.length / 2)));
-  const chars = Array.from({ length: safeWidth }, () => " ");
-
-  for (let i = 0; i < glyph.length; i += 1) {
-    chars[start + i] = glyph[i];
-  }
-
-  return chars.join("");
-}
-
-function buildTelegraphHead(width: number, activeIndex: number, phase: number): string[] {
-  const slotWidth = LETTER_ART.R[0].length + 1;
-  const center = Math.min(width - 1, activeIndex * slotWidth + Math.floor(LETTER_ART.R[0].length / 2));
-  return HEAD_FRAMES[phase % HEAD_FRAMES.length].map((glyph) => placeGlyph(width, center, glyph));
+  return Array.from({ length: BLANK_LETTER.length }, (_, row) => letters.map((art) => art[row]).join(" "));
 }
 
 interface RoscoeIntroProps {
@@ -154,7 +263,7 @@ export function RoscoeIntro({ onDone }: RoscoeIntroProps) {
   useEffect(() => {
     const interval = setInterval(() => {
       setTick((current) => current + 1);
-    }, LETTER_TICK_MS);
+    }, FRAME_TICK_MS);
 
     return () => {
       clearInterval(interval);
@@ -178,15 +287,12 @@ export function RoscoeIntro({ onDone }: RoscoeIntroProps) {
     () => buildRoscoeWordmark(stampedLetters, activeSpinPhase),
     [activeSpinPhase, stampedLetters],
   );
+  const millFrames = useMemo(() => buildMillFrames(), []);
+  const millFrame = millFrames[tick % millFrames.length];
   const taglineChars = Math.max(0, tick - totalRevealTicks + 6);
-  const rail = buildPulseRail(RAIL_WIDTH, tick);
-  const wheelFrame = WHEEL_FRAMES[Math.floor(tick / 4) % WHEEL_FRAMES.length];
   const visibleTagline = TAGLINE.slice(0, Math.min(TAGLINE.length, taglineChars));
   const showPrompt = tick > totalRevealTicks + 18;
   const promptVisible = showPrompt && Math.floor(tick / 10) % 2 === 0;
-  const headLines = !titleSettled
-    ? buildTelegraphHead(wordmark[0]?.length ?? 0, revealStep, phase)
-    : [];
 
   return (
     <Box
@@ -197,19 +303,15 @@ export function RoscoeIntro({ onDone }: RoscoeIntroProps) {
       overflow="hidden"
     >
       <Box flexDirection="column" gap={1} paddingX={1} paddingY={1}>
-        <Box justifyContent="center">
-          <Text color="yellow" dimColor>{`${wheelFrame} ${rail} ${wheelFrame}`}</Text>
+        <Box flexDirection="column">
+          {millFrame.map((line, index) => (
+            <Box key={`mill-${index}`} justifyContent="center">
+              <Text color={index <= 3 || index >= 19 ? "cyan" : index >= 17 ? "yellow" : "gray"} dimColor={index >= 17 && index < 19}>
+                {line}
+              </Text>
+            </Box>
+          ))}
         </Box>
-
-        {headLines.length > 0 && (
-          <Box flexDirection="column">
-            {headLines.map((line, index) => (
-              <Box key={`head-${index}`} justifyContent="center">
-                <Text color={index === 1 ? "white" : "yellow"}>{line}</Text>
-              </Box>
-            ))}
-          </Box>
-        )}
 
         <Box flexDirection="column">
           {wordmark.map((line, index) => (
@@ -221,10 +323,6 @@ export function RoscoeIntro({ onDone }: RoscoeIntroProps) {
 
         <Box justifyContent="center">
           <Text bold>{visibleTagline || " "}</Text>
-        </Box>
-
-        <Box justifyContent="center">
-          <Text color="yellow" dimColor>{`${wheelFrame} ${rail.split("").reverse().join("")} ${wheelFrame}`}</Text>
         </Box>
 
         <Box justifyContent="center">

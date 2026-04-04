@@ -637,7 +637,7 @@ describe("SessionMonitor", () => {
       mockProc.stdout.write("  \n");
     });
 
-    it("emits codex and gemini tool activity details from metadata lines", () => {
+    it("emits codex, qwen, and gemini tool activity details from metadata lines", () => {
       const codexMonitor = new SessionMonitor("codex-tool", {
         name: "codex",
         command: "codex",
@@ -646,6 +646,15 @@ describe("SessionMonitor", () => {
       });
       const codexProc = createMockProc();
       mockSpawn.mockReturnValueOnce(codexProc);
+
+      const qwenMonitor = new SessionMonitor("qwen-tool", {
+        name: "qwen",
+        command: "qwen",
+        args: [],
+        protocol: "qwen",
+      });
+      const qwenProc = createMockProc();
+      mockSpawn.mockReturnValueOnce(qwenProc);
 
       const geminiMonitor = new SessionMonitor("gemini-tool", {
         name: "gemini",
@@ -660,11 +669,15 @@ describe("SessionMonitor", () => {
       codexMonitor.on("tool-activity", (toolName, detail) => {
         events.push({ tool: toolName, detail });
       });
+      qwenMonitor.on("tool-activity", (toolName, detail) => {
+        events.push({ tool: toolName, detail });
+      });
       geminiMonitor.on("tool-activity", (toolName, detail) => {
         events.push({ tool: toolName, detail });
       });
 
       codexMonitor.startTurn("codex");
+      qwenMonitor.startTurn("qwen");
       geminiMonitor.startTurn("gemini");
 
       codexProc.stdout.write(JSON.stringify({
@@ -672,6 +685,20 @@ describe("SessionMonitor", () => {
         item: {
           type: "shell",
           command: "pnpm test",
+        },
+      }) + "\n");
+      qwenProc.stdout.write(JSON.stringify({
+        type: "stream_event",
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            name: "shell",
+            input: {
+              command: "pnpm typecheck",
+            },
+          },
         },
       }) + "\n");
       geminiProc.stdout.write(JSON.stringify({
@@ -684,6 +711,7 @@ describe("SessionMonitor", () => {
 
       expect(events).toEqual([
         { tool: "shell", detail: "bash · pnpm test" },
+        { tool: "shell", detail: "bash · pnpm typecheck" },
         { tool: "shell", detail: "bash · pnpm lint" },
       ]);
     });

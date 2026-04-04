@@ -1665,16 +1665,6 @@ export function HomeScreen() {
             {activeProvider.preflight.note ? (
               <Text dimColor>{activeProvider.preflight.note}</Text>
             ) : null}
-            {activeProvider.id === "codex" && (
-              <Text dimColor>
-                <Text color="cyan">codex --help</Text>
-                {" does not expose a startup "}
-                <Text color="magenta">--fast</Text>
-                {" flag. Roscoe can only treat "}
-                <Text color="magenta">/fast</Text>
-                {" as an in-session command."}
-              </Text>
-            )}
             {activeProvider.id === "gemini" && (
               <Text dimColor>Gemini lanes use <Text color="cyan">--output-format stream-json</Text>, <Text color="cyan">--resume</Text>, and Roscoe's normal safe/accelerated execution mapping.</Text>
             )}
@@ -1707,19 +1697,6 @@ export function HomeScreen() {
           ) : (
             <Box marginTop={1}>
               <Text dimColor>No Roscoe-managed startup toggles are available for this provider yet.</Text>
-            </Box>
-          )}
-
-          {activeProvider.sessionCommands.length > 0 && (
-            <Box marginTop={1} flexDirection="column">
-              <Text color="yellow" bold>Session Commands</Text>
-              {activeProvider.sessionCommands.map((command) => (
-                <Box key={command.command} flexDirection="column" marginTop={1}>
-                  <Text>{command.label} <Text color="magenta">{command.command}</Text></Text>
-                  <Text dimColor>{command.description}</Text>
-                  {command.note ? <Text dimColor>{command.note}</Text> : null}
-                </Box>
-              ))}
             </Box>
           )}
 

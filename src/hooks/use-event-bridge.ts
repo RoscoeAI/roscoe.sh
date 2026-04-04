@@ -21,7 +21,12 @@ import {
 } from "../session-transcript.js";
 import { buildReadyPreviewState, getPreviewState } from "../session-preview.js";
 import type { HostAction } from "../response-generator.js";
-import { inferRoscoeDecision } from "../roscoe-draft.js";
+import {
+  inferRoscoeDecision,
+  isDeveloperRetestBlockedReasoning,
+  isSilentNoOpReasoning,
+  isSuppressedContinuationGuard,
+} from "../roscoe-draft.js";
 
 const RESUME_ACTIVITY_NAME = "resume";
 const RESUME_PENDING_DETAIL = "Resuming interrupted Guild turn...";
@@ -56,6 +61,27 @@ function hasPendingLocalSuggestion(session: SessionState): boolean {
   return session.timeline.some((entry) => entry.kind === "local-suggestion" && entry.state === "pending");
 }
 
+function hasDismissedNoOpTail(session: SessionState): boolean {
+  for (let index = session.timeline.length - 1; index >= 0; index -= 1) {
+    const entry = session.timeline[index];
+    if (entry.kind === "local-suggestion") {
+      const decision = inferRoscoeDecision({ decision: entry.decision, message: entry.text, reasoning: entry.reasoning });
+      return entry.state === "dismissed"
+        && (
+          decision === "noop"
+          || (
+            !entry.text.trim()
+            && isDeveloperRetestBlockedReasoning(entry.reasoning)
+          )
+        );
+    }
+    if (entry.kind === "remote-turn" || entry.kind === "local-sent") {
+      return false;
+    }
+  }
+  return false;
+}
+
 function getLastLocalSuggestion(session: SessionState): Extract<SessionState["timeline"][number], { kind: "local-suggestion" }> | null {
   for (let index = session.timeline.length - 1; index >= 0; index -= 1) {
     const entry = session.timeline[index];
@@ -85,7 +111,13 @@ function shouldAutonomouslyResumeWaitingLane(
 
   const lastSuggestion = getLastLocalSuggestion(session);
   if (!lastSuggestion || lastSuggestion.state !== "dismissed") return false;
-  if (inferRoscoeDecision({ message: lastSuggestion.text, reasoning: lastSuggestion.reasoning }) !== "noop") return false;
+  if (inferRoscoeDecision({ decision: lastSuggestion.decision, message: lastSuggestion.text, reasoning: lastSuggestion.reasoning }) !== "noop") return false;
+  if (
+    !isSilentNoOpReasoning(lastSuggestion.reasoning)
+    && !isSuppressedContinuationGuard({ message: lastSuggestion.text, reasoning: lastSuggestion.reasoning })
+  ) {
+    return false;
+  }
 
   return Boolean(session.managed.tracker.getContextForGeneration().trim());
 }
@@ -105,6 +137,7 @@ export function shouldQueueSuggestionForSession(session: SessionState): boolean 
   if (session.currentToolUse) return false;
   if (getPreviewState(session.preview).mode !== "off") return false;
   if (hasPendingLocalSuggestion(session)) return false;
+  if (hasDismissedNoOpTail(session)) return false;
   if (inferTerminalParkedState(session.timeline, session.summary)) return false;
   const lastConversationEntry = getLastConversationEntry(session.timeline);
   if (lastConversationEntry?.kind !== "remote-turn") return false;
@@ -423,6 +456,7 @@ export async function handleGeneratedSuggestion(
   const decision = inferRoscoeDecision(result);
 
   if (decision === "noop") {
+    dispatch({ type: "SUGGESTION_READY", id, result });
     dispatch({ type: "REJECT_SUGGESTION", id });
     dispatch({ type: "SYNC_MANAGED_SESSION", id, managed });
     return;

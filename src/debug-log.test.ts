@@ -35,6 +35,13 @@ describe("debug-log", () => {
     );
   });
 
+  it("enableDebug is idempotent once logging is active", async () => {
+    const { enableDebug } = await import("./debug-log.js");
+    enableDebug();
+    enableDebug();
+    expect(appendFileSync).toHaveBeenCalledTimes(1);
+  });
+
   it("dbg does nothing when not enabled", async () => {
     const { dbg } = await import("./debug-log.js");
     dbg("test", "message");

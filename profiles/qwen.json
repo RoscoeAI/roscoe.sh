@@ -1,0 +1,6 @@
+{
+  "name": "qwen",
+  "command": "qwen",
+  "args": [],
+  "protocol": "qwen"
+}

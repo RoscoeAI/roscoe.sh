@@ -433,6 +433,9 @@ export function OnboardingScreen({
     const workerByProtocol: ProjectRuntimeDefaults["workerByProtocol"] = {
       claude: getDefaultWorkerRuntime("claude"),
       codex: getDefaultWorkerRuntime("codex"),
+      qwen: getDefaultWorkerRuntime("qwen"),
+      gemini: getDefaultWorkerRuntime("gemini"),
+      kimi: getDefaultWorkerRuntime("kimi"),
     };
     workerByProtocol[guildProvider] = mergeRuntimeSettings(
       executionMode === "accelerated"

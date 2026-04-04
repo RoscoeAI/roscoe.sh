@@ -252,12 +252,13 @@ export function getRestoredSuggestionPhase(entries: TranscriptEntry[]): Suggesti
   for (let index = sorted.length - 1; index >= 0; index -= 1) {
     const entry = sorted[index];
     if (entry.kind === "local-suggestion" && entry.state === "pending") {
-      if (shouldSuppressRestoredRoscoeSuggestion({ message: entry.text, reasoning: entry.reasoning })) {
+      if (shouldSuppressRestoredRoscoeSuggestion({ decision: entry.decision, message: entry.text, reasoning: entry.reasoning })) {
         return { kind: "idle" };
       }
       return {
         kind: "ready",
         result: {
+          decision: entry.decision,
           text: entry.text,
           confidence: entry.confidence,
           reasoning: entry.reasoning,
@@ -273,7 +274,7 @@ export function normalizeRestoredTimeline(entries: TranscriptEntry[]): Transcrip
     if (
       entry.kind === "local-suggestion"
       && entry.state === "pending"
-      && shouldSuppressRestoredRoscoeSuggestion({ message: entry.text, reasoning: entry.reasoning })
+      && shouldSuppressRestoredRoscoeSuggestion({ decision: entry.decision, message: entry.text, reasoning: entry.reasoning })
     ) {
       return {
         ...entry,

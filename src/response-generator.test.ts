@@ -1249,9 +1249,9 @@ describe("ResponseGenerator", () => {
       expect(result.text).toBe("This lane is parked.");
       expect(saveSpy).toHaveBeenCalledTimes(1);
       const saved = saveSpy.mock.calls[0]?.[0] as config.ProjectContext;
-      expect(saved.intentBrief.acceptanceLedger?.slice(0, 3).map((item) => item.status)).toEqual(["proven", "proven", "proven"]);
-      expect(saved.intentBrief.acceptanceLedger?.[3]?.status).toBe("open");
-      expect(saved.intentBrief.acceptanceLedger?.[0]?.evidence.some((entry) => entry.includes("Transcript proof:"))).toBe(true);
+      expect(saved.intentBrief?.acceptanceLedger?.slice(0, 3).map((item) => item.status)).toEqual(["proven", "proven", "proven"]);
+      expect(saved.intentBrief?.acceptanceLedger?.[3]?.status).toBe("open");
+      expect(saved.intentBrief?.acceptanceLedger?.[0]?.evidence.some((entry) => entry.includes("Transcript proof:"))).toBe(true);
     });
 
     it("promotes hosted outcome summary closures when a nearby green run proves them", async () => {
@@ -1317,9 +1317,9 @@ describe("ResponseGenerator", () => {
       expect(result.text).toBe("Continue with the next still-open ledger item.");
       expect(saveSpy).toHaveBeenCalledTimes(1);
       const saved = saveSpy.mock.calls[0]?.[0] as config.ProjectContext;
-      expect(saved.intentBrief.acceptanceLedger?.slice(0, 3).map((item) => item.status)).toEqual(["proven", "proven", "proven"]);
-      expect(saved.intentBrief.acceptanceLedger?.[3]?.status).toBe("open");
-      expect(saved.intentBrief.acceptanceLedger?.[0]?.evidence.some((entry) => entry.includes("23875230249"))).toBe(true);
+      expect(saved.intentBrief?.acceptanceLedger?.slice(0, 3).map((item) => item.status)).toEqual(["proven", "proven", "proven"]);
+      expect(saved.intentBrief?.acceptanceLedger?.[3]?.status).toBe("open");
+      expect(saved.intentBrief?.acceptanceLedger?.[0]?.evidence.some((entry) => entry.includes("23875230249"))).toBe(true);
     });
 
     it("rewrites stalled Guild review drafts into an automatic restart on the next open ledger item", async () => {
@@ -2261,12 +2261,13 @@ describe("ResponseGenerator", () => {
       (gen as any).parseSuggestionOutput = vi.fn(() => {
         throw "bad-parse";
       });
-      responderMonitor.startTurn.mockImplementationOnce(() => {
+      responderMonitor.startTurn.mockImplementationOnce((prompt: string) => {
         setImmediate(() => {
           responderMonitor.emit("text", "{\"message\":\"ok\"}");
           responderMonitor.emit("turn-complete");
           responderMonitor.emit("exit", 0);
         });
+        return prompt;
       });
 
       await expect(gen.generateSuggestion(
@@ -2291,11 +2292,12 @@ describe("ResponseGenerator", () => {
       (gen as any).parseSuggestionOutput = vi.fn(() => {
         throw "bad-exit-parse";
       });
-      responderMonitor.startTurn.mockImplementationOnce(() => {
+      responderMonitor.startTurn.mockImplementationOnce((prompt: string) => {
         setImmediate(() => {
           responderMonitor.emit("text", "{\"message\":\"ok\"}");
           responderMonitor.emit("exit", 0);
         });
+        return prompt;
       });
 
       await expect(gen.generateSuggestion(

@@ -6,6 +6,7 @@ let enabled = false;
 let logPath = "";
 
 export function enableDebug(): void {
+  if (enabled && logPath) return;
   enabled = true;
   const dir = join(homedir(), ".roscoe");
   mkdirSync(dir, { recursive: true });

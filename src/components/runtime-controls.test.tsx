@@ -173,6 +173,7 @@ describe("RuntimeEditorPanel", () => {
     const frame = lastFrame()!;
     expect(frame).toContain("Claude");
     expect(frame).toContain("Codex");
+    expect(frame).toContain("Qwen");
   });
 
   it("keeps both Guild runtime mode choices visible after advancing to that step", async () => {
@@ -231,10 +232,10 @@ describe("RuntimeEditorPanel", () => {
 
     app.stdin.write("\r");
     await waitFor(() => {
-      expect(app.lastFrame()).toContain("Roscoe model:");
+      expect(app.lastFrame()).toContain("Editable now: Roscoe model");
+      expect(app.lastFrame()).toContain("claude-opus-4-6");
     });
 
-    app.stdin.write("gpt-5.4-mini");
     app.stdin.write("\r");
     await waitFor(() => {
       expect(app.lastFrame()).toContain("Editable now: Roscoe reasoning");
@@ -278,7 +279,7 @@ describe("RuntimeEditorPanel", () => {
     }));
   });
 
-  it("walks the manual Guild runtime path through pinned model and reasoning", async () => {
+  it("shows provider-aware model IDs before Guild reasoning", async () => {
     const onApply = vi.fn();
     const app = render(
       <RuntimeEditorPanel
@@ -312,10 +313,48 @@ describe("RuntimeEditorPanel", () => {
     await delay(20);
     app.stdin.write("\r");
     await waitFor(() => {
-      expect(app.lastFrame()).toContain("Guild model:");
+      expect(app.lastFrame()).toContain("Editable now: Guild model");
+      expect(app.lastFrame()).toContain("claude-opus-4-6");
+      expect(app.lastFrame()).toContain("claude-sonnet-4-6");
+      expect(app.lastFrame()).toContain("Custom model ID");
     });
 
-    app.stdin.write("gpt-5.4");
+    app.stdin.write("\r");
+    await waitFor(() => {
+      expect(app.lastFrame()).toContain("Editable now: Guild reasoning");
+    });
+  });
+
+  it("allows a custom Roscoe model ID from the model menu", async () => {
+    const onApply = vi.fn();
+    const app = render(
+      <RuntimeEditorPanel
+        protocol="codex"
+        runtime={{
+          tuningMode: "auto",
+          model: "gpt-5.4",
+          reasoningEffort: "medium",
+          bypassApprovalsAndSandbox: true,
+        }}
+        responderRuntime={{
+          tuningMode: "manual",
+          model: "gpt-5.4",
+          reasoningEffort: "high",
+          bypassApprovalsAndSandbox: true,
+        }}
+        workerGovernanceMode="roscoe-arbiter"
+        verificationCadence="batched"
+        responderApprovalMode="auto"
+        onApply={onApply}
+      />,
+    );
+
+    await delay();
+    app.stdin.write("\r");
+    await waitFor(() => {
+      expect(app.lastFrame()).toContain("Editable now: Guild runtime");
+    });
+
     app.stdin.write("\r");
     await waitFor(() => {
       expect(app.lastFrame()).toContain("Editable now: Guild reasoning");
@@ -324,6 +363,26 @@ describe("RuntimeEditorPanel", () => {
     app.stdin.write("\r");
     await waitFor(() => {
       expect(app.lastFrame()).toContain("Editable now: Roscoe provider");
+    });
+
+    app.stdin.write("\r");
+    await waitFor(() => {
+      expect(app.lastFrame()).toContain("Editable now: Roscoe model");
+    });
+
+    app.stdin.write("\u001B[B");
+    app.stdin.write("\u001B[B");
+    app.stdin.write("\u001B[B");
+    await delay(20);
+    app.stdin.write("\r");
+    await waitFor(() => {
+      expect(app.lastFrame()).toContain("Type Roscoe's preferred responder model ID.");
+    });
+
+    app.stdin.write("gpt-5.4-mini");
+    app.stdin.write("\r");
+    await waitFor(() => {
+      expect(app.lastFrame()).toContain("Editable now: Roscoe reasoning");
     });
   });
 });

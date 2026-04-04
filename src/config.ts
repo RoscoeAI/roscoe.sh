@@ -225,10 +225,20 @@ export interface GeminiProviderSettings {
   enabled: boolean;
 }
 
+export interface QwenProviderSettings {
+  enabled: boolean;
+}
+
+export interface KimiProviderSettings {
+  enabled: boolean;
+}
+
 export interface RoscoeProviderSettings {
   claude: ClaudeProviderSettings;
   codex: CodexProviderSettings;
+  qwen: QwenProviderSettings;
   gemini: GeminiProviderSettings;
+  kimi: KimiProviderSettings;
 }
 
 export interface RoscoeBehaviorSettings {
@@ -572,7 +582,7 @@ function normalizeProjectRuntimeDefaults(value: unknown): ProjectRuntimeDefaults
     : null;
   if (workerByProtocol) {
     const normalizedWorkers: ProjectRuntimeDefaults["workerByProtocol"] = {};
-    for (const protocol of ["claude", "codex", "gemini"] as const) {
+    for (const protocol of ["claude", "codex", "qwen", "gemini", "kimi"] as const) {
       if (workerByProtocol[protocol] && typeof workerByProtocol[protocol] === "object") {
         normalizedWorkers[protocol] = normalizeRuntimeControlSettings(workerByProtocol[protocol]);
       }
@@ -587,7 +597,7 @@ function normalizeProjectRuntimeDefaults(value: unknown): ProjectRuntimeDefaults
     : null;
   if (responderByProtocol) {
     const normalizedResponders: ProjectRuntimeDefaults["responderByProtocol"] = {};
-    for (const protocol of ["claude", "codex", "gemini"] as const) {
+    for (const protocol of ["claude", "codex", "qwen", "gemini", "kimi"] as const) {
       if (responderByProtocol[protocol] && typeof responderByProtocol[protocol] === "object") {
         normalizedResponders[protocol] = normalizeRuntimeControlSettings(responderByProtocol[protocol]);
       }
@@ -914,6 +924,24 @@ function normalizeGeminiProviderSettings(value: unknown): GeminiProviderSettings
   };
 }
 
+function normalizeQwenProviderSettings(value: unknown): QwenProviderSettings {
+  const typed = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    enabled: typed.enabled !== false,
+  };
+}
+
+function normalizeKimiProviderSettings(value: unknown): KimiProviderSettings {
+  const typed = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    enabled: typed.enabled !== false,
+  };
+}
+
 function normalizeProviderSettings(value: unknown): RoscoeProviderSettings {
   const typed = value && typeof value === "object"
     ? value as Record<string, unknown>
@@ -921,7 +949,9 @@ function normalizeProviderSettings(value: unknown): RoscoeProviderSettings {
   return {
     claude: normalizeClaudeProviderSettings(typed.claude),
     codex: normalizeCodexProviderSettings(typed.codex),
+    qwen: normalizeQwenProviderSettings(typed.qwen),
     gemini: normalizeGeminiProviderSettings(typed.gemini),
+    kimi: normalizeKimiProviderSettings(typed.kimi),
   };
 }
 

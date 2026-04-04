@@ -1636,7 +1636,7 @@ ${await this.buildContext(conversationContext, llmName, session)}
 
 ---
 
-${this.getStructuredResponseInstructions(this.browser !== null, projectCtx !== null)}`;
+${this.getStructuredResponseInstructions(this.browser !== null, projectCtx !== null, session !== undefined)}`;
 
     onTrace?.({
       prompt,

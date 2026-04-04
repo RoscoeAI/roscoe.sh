@@ -26,6 +26,7 @@ import { isParkedDecisionText, sortTranscriptEntries } from "./session-transcrip
 import { getPreviewState } from "./session-preview.js";
 import { loadRoscoeSettings } from "./config.js";
 import { setRoscoeKeepAwakeEnabled } from "./keep-awake.js";
+import { dbg, enableDebug } from "./debug-log.js";
 
 // ── Reducer ────────────────────────────────────────────────
 
@@ -112,6 +113,7 @@ function getReturnSuggestionPhase(session: SessionState): SuggestionReturnPhase 
   return {
     kind: "ready",
     result: {
+      decision: lastSuggestion.decision,
       text: normalizeRoscoeDraftMessage(lastSuggestion.text),
       confidence: lastSuggestion.confidence,
       reasoning: lastSuggestion.reasoning,
@@ -355,6 +357,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         id: createEntryId("suggestion", session),
         kind: "local-suggestion",
         timestamp: Date.now(),
+        decision: action.result.decision,
         text: action.result.text,
         confidence: action.result.confidence,
         reasoning: action.result.reasoning,
@@ -848,6 +851,12 @@ export default function App({
   useEventBridge(state.sessions, dispatch, service, state.autoMode);
   useHostedRelayWire(state.sessions, dispatch, service);
   useSmsWire(state.sessions, dispatch, service);
+
+  useEffect(() => {
+    if (!debug) return;
+    enableDebug();
+    dbg("app", `screen=${state.screen} active=${state.activeSessionId ?? "none"}`);
+  }, [debug, state.activeSessionId, state.screen]);
 
   useEffect(() => {
     setRoscoeKeepAwakeEnabled(loadRoscoeSettings().behavior.preventSleepWhileRunning);

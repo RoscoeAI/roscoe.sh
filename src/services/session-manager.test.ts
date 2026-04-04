@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { homedir } from "os";
 import { resolve } from "path";
 import { EventEmitter } from "events";
+import type { SessionState } from "../types.js";
 
 const { mockStartOneShotRun, mockExecFile } = vi.hoisted(() => ({
   mockStartOneShotRun: vi.fn(() => ({
@@ -333,7 +334,7 @@ describe("SessionManagerService", () => {
       managed.responderHistoryCursor = 4;
       vi.mocked(saveLaneSession).mockClear();
 
-      const sessionState = {
+      const sessionState: SessionState = {
         id: managed.id,
         profileName: managed.profileName,
         projectName: managed.projectName,
@@ -345,6 +346,7 @@ describe("SessionManagerService", () => {
         managed,
         summary: "Retrying responder",
         currentToolUse: null,
+        currentToolDetail: null,
         usage: {
           inputTokens: 12,
           outputTokens: 3,

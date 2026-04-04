@@ -260,7 +260,7 @@ describe("ProjectBriefView", () => {
             guildProvider: "codex",
             responderProvider: "claude",
             workerGovernanceMode: "guild-autonomous",
-            verificationCadence: "batch-proofs",
+            verificationCadence: "batched",
             tokenEfficiencyMode: "save-tokens",
             workerByProtocol: {
               codex: {

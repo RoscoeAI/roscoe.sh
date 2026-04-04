@@ -276,18 +276,128 @@ describe("buildTurnCommand", () => {
       "--raw-output",
     ]);
   });
+
+  it("builds Kimi turns with print mode, plan in safe mode, thinking toggles, and resume support", () => {
+    const safeCommand = buildTurnCommand({
+      name: "kimi",
+      command: "kimi",
+      args: [],
+      protocol: "kimi",
+      runtime: {
+        model: "kimi-for-coding",
+        executionMode: "safe",
+        reasoningEffort: "high",
+      },
+    }, "hello", "kimi-session-1");
+
+    expect(safeCommand.args).toEqual([
+      "-m",
+      "kimi-for-coding",
+      "--plan",
+      "--thinking",
+      "--print",
+      "--output-format",
+      "stream-json",
+      "--resume",
+      "kimi-session-1",
+      "-p",
+      "hello",
+    ]);
+
+    const lowEffortCommand = buildTurnCommand({
+      name: "kimi",
+      command: "kimi",
+      args: ["--yolo"],
+      protocol: "kimi",
+      runtime: {
+        model: "kimi-for-coding",
+        executionMode: "accelerated",
+        reasoningEffort: "low",
+      },
+    }, "ship it");
+
+    expect(lowEffortCommand.args).toEqual([
+      "-m",
+      "kimi-for-coding",
+      "--no-thinking",
+      "--print",
+      "--output-format",
+      "stream-json",
+      "-p",
+      "ship it",
+      "--yolo",
+    ]);
+  });
+
+  it("builds Qwen turns with sandboxed safe mode, partial stream-json output, and resume support", () => {
+    const safeCommand = buildTurnCommand({
+      name: "qwen",
+      command: "qwen",
+      args: [],
+      protocol: "qwen",
+      runtime: {
+        model: "coder-model",
+        executionMode: "safe",
+        reasoningEffort: "high",
+      },
+    }, "hello", "qwen-session-1");
+
+    expect(safeCommand.args).toEqual([
+      "-m",
+      "coder-model",
+      "--sandbox",
+      "--approval-mode",
+      "yolo",
+      "--output-format",
+      "stream-json",
+      "--include-partial-messages",
+      "--resume",
+      "qwen-session-1",
+      "hello",
+    ]);
+
+    const acceleratedCommand = buildTurnCommand({
+      name: "qwen",
+      command: "qwen",
+      args: ["--allowed-mcp-server-names", "serena"],
+      protocol: "qwen",
+      runtime: {
+        model: "coder-model",
+        executionMode: "accelerated",
+      },
+    }, "ship it");
+
+    expect(acceleratedCommand.args).toEqual([
+      "-m",
+      "coder-model",
+      "--approval-mode",
+      "yolo",
+      "--output-format",
+      "stream-json",
+      "--include-partial-messages",
+      "--allowed-mcp-server-names",
+      "serena",
+      "ship it",
+    ]);
+  });
 });
 
 describe("provider adapters", () => {
-  it("treats Gemini as a first-class protocol value", () => {
+  it("treats Qwen, Gemini, and Kimi as first-class protocol values", () => {
+    expect(isLLMProtocol("qwen")).toBe(true);
     expect(isLLMProtocol("gemini")).toBe(true);
+    expect(isLLMProtocol("kimi")).toBe(true);
+    expect(detectProtocol({ name: "qwen", command: "qwen" })).toBe("qwen");
     expect(detectProtocol({ name: "gemini", command: "gemini" })).toBe("gemini");
+    expect(detectProtocol({ name: "kimi", command: "kimi" })).toBe("kimi");
+    expect(getProviderAdapter("qwen").defaultProfileName).toBe("qwen");
     expect(getProviderAdapter("gemini").defaultProfileName).toBe("gemini");
+    expect(getProviderAdapter("kimi").defaultProfileName).toBe("kimi");
   });
 
   it("defaults unknown commands to claude and exposes provider summaries", () => {
     expect(detectProtocol({ name: "mystery", command: "llm" })).toBe("claude");
-    expect(listProviderAdapters().map((adapter) => adapter.id)).toEqual(["claude", "codex", "gemini"]);
+    expect(listProviderAdapters().map((adapter) => adapter.id)).toEqual(["claude", "codex", "qwen", "kimi", "gemini"]);
 
     expect(summarizeRuntime({
       name: "codex",
@@ -331,6 +441,14 @@ describe("provider adapters", () => {
     expect(getProviderAdapter("gemini").applyManagedArgs(["--raw-output"], {
       ignored: true,
     })).toEqual(["--raw-output"]);
+
+    expect(getProviderAdapter("qwen").applyManagedArgs(["--sandbox"], {
+      ignored: true,
+    })).toEqual(["--sandbox"]);
+
+    expect(getProviderAdapter("kimi").applyManagedArgs(["--yolo"], {
+      ignored: true,
+    })).toEqual(["--yolo"]);
   });
 
   it("summarizes runtime for Claude danger mode", () => {
@@ -448,6 +566,65 @@ describe("parseOneShotStreamLine", () => {
     )).toEqual({
       replaceText: "Full Gemini response",
     });
+  });
+
+  it("parses Kimi assistant text blocks as a replacement", () => {
+    const profile: HeadlessProfile = {
+      name: "kimi",
+      command: "kimi",
+      args: [],
+      protocol: "kimi",
+    };
+
+    expect(parseOneShotStreamLine(
+      profile,
+      JSON.stringify({
+        role: "assistant",
+        content: [
+          { type: "think", think: "quietly plan" },
+          { type: "text", text: "Hello" },
+          { type: "text", text: " from Kimi" },
+        ],
+      }),
+    )).toEqual({
+      replaceText: "Hello from Kimi",
+    });
+  });
+
+  it("parses Qwen assistant and stream-json text as one-shot output", () => {
+    const profile: HeadlessProfile = {
+      name: "qwen",
+      command: "qwen",
+      args: [],
+      protocol: "qwen",
+    };
+
+    expect(parseOneShotStreamLine(
+      profile,
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "thinking", thinking: "quietly plan" },
+            { type: "text", text: "Hello" },
+            { type: "text", text: " from Qwen" },
+          ],
+        },
+      }),
+    )).toEqual({
+      replaceText: "Hello from Qwen",
+    });
+
+    expect(parseOneShotStreamLine(
+      profile,
+      JSON.stringify({
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text: "partial" },
+        },
+      }),
+    )).toEqual({ appendText: "partial" });
   });
 
   it("ignores unsupported one-shot payloads across providers", () => {
@@ -676,6 +853,180 @@ describe("parseSessionStreamLine", () => {
       outputTokens: 5,
       cachedInputTokens: 2,
       cacheCreationInputTokens: 1,
+    });
+  });
+
+  it("parses Kimi resume lines, tool-call activity, thinking, and completion", () => {
+    const profile: HeadlessProfile = {
+      name: "kimi",
+      command: "kimi",
+      args: [],
+      protocol: "kimi",
+    };
+    const seen: Record<string, unknown> = {};
+
+    parseSessionStreamLine(
+      profile,
+      "To resume this session: kimi -r kimi-session-123",
+      {
+        onSessionId: (value) => { seen.sessionId = value; },
+      },
+      {},
+    );
+
+    parseSessionStreamLine(
+      profile,
+      JSON.stringify({
+        role: "assistant",
+        tool_calls: [
+          {
+            function: {
+              name: "list_directory",
+              arguments: "{\"path\":\".\"}",
+            },
+          },
+        ],
+        content: [
+          { type: "think", think: "checking files" },
+        ],
+      }),
+      {
+        onThinking: (value) => { seen.thinking = value; },
+      },
+      {},
+    );
+
+    parseSessionStreamLine(
+      profile,
+      JSON.stringify({
+        role: "assistant",
+        content: [
+          { type: "text", text: "All set." },
+        ],
+      }),
+      {
+        onText: (value) => { seen.text = value; },
+        onTurnComplete: () => { seen.done = true; },
+      },
+      {},
+    );
+
+    expect(seen).toEqual({
+      sessionId: "kimi-session-123",
+      thinking: "checking files",
+      text: "All set.",
+      done: true,
+    });
+  });
+
+  it("parses Qwen init, tool-use streaming, thinking, text, and completion", () => {
+    const profile: HeadlessProfile = {
+      name: "qwen",
+      command: "qwen",
+      args: [],
+      protocol: "qwen",
+    };
+    const seen: Record<string, unknown> = {};
+
+    parseSessionStreamLine(
+      profile,
+      JSON.stringify({
+        type: "system",
+        subtype: "init",
+        session_id: "qwen-session-123",
+      }),
+      {
+        onSessionId: (value) => { seen.sessionId = value; },
+      },
+      {},
+    );
+
+    parseSessionStreamLine(
+      profile,
+      JSON.stringify({
+        type: "stream_event",
+        event: {
+          type: "content_block_start",
+          index: 1,
+          content_block: {
+            type: "tool_use",
+            name: "list_directory",
+            input: { path: "." },
+          },
+        },
+      }),
+      {
+        onToolActivity: (value) => { seen.tool = value; },
+      },
+      {},
+    );
+
+    parseSessionStreamLine(
+      profile,
+      JSON.stringify({
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: {
+            type: "thinking_delta",
+            thinking: "checking files",
+          },
+        },
+      }),
+      {
+        onThinking: (value) => { seen.thinking = value; },
+      },
+      {},
+    );
+
+    parseSessionStreamLine(
+      profile,
+      JSON.stringify({
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: {
+            type: "text_delta",
+            text: "All set.",
+          },
+        },
+      }),
+      {
+        onText: (value) => { seen.text = value; },
+      },
+      {},
+    );
+
+    parseSessionStreamLine(
+      profile,
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        session_id: "qwen-session-123",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 2,
+        },
+      }),
+      {
+        onUsage: (usage) => { seen.usage = usage; },
+        onTurnComplete: () => { seen.done = true; },
+      },
+      {},
+    );
+
+    expect(seen).toEqual({
+      sessionId: "qwen-session-123",
+      tool: "list_directory",
+      thinking: "checking files",
+      text: "All set.",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 2,
+        cachedInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
+      done: true,
     });
   });
 

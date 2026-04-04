@@ -461,6 +461,31 @@ describe("shouldQueueSuggestionForSession", () => {
     expect(shouldQueueSuggestionForSession(session)).toBe(false);
   });
 
+  it("returns false when the latest lane tail is a dismissed noop suggestion on the same remote turn", () => {
+    const session = makeSession({
+      timeline: [
+        {
+          id: "remote-1",
+          kind: "remote-turn",
+          timestamp: 1,
+          provider: "claude-code",
+          text: "Here is the latest result.",
+        },
+        {
+          id: "suggestion-1",
+          kind: "local-suggestion",
+          timestamp: 2,
+          decision: "noop",
+          text: "",
+          confidence: 94,
+          reasoning: "Blocked on developer retest — fix deployed, needs-review surfaced, no new turns.",
+          state: "dismissed",
+        },
+      ],
+    });
+    expect(shouldQueueSuggestionForSession(session)).toBe(false);
+  });
+
   it("returns false for parked or blocked lanes", () => {
     expect(shouldQueueSuggestionForSession(makeSession({ status: "parked" }))).toBe(false);
     expect(shouldQueueSuggestionForSession(makeSession({ status: "blocked" }))).toBe(false);
@@ -750,8 +775,9 @@ describe("handleGeneratedSuggestion", () => {
 
     await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-5", result, true);
 
-    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "REJECT_SUGGESTION", id: "lane-5" });
-    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "SYNC_MANAGED_SESSION", id: "lane-5", managed });
+    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "SUGGESTION_READY", id: "lane-5", result });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "REJECT_SUGGESTION", id: "lane-5" });
+    expect(dispatch).toHaveBeenNthCalledWith(3, { type: "SYNC_MANAGED_SESSION", id: "lane-5", managed });
     expect(service.executeSuggestion).not.toHaveBeenCalled();
     expect(service.maybeNotifyIntervention).not.toHaveBeenCalled();
   });
@@ -774,8 +800,9 @@ describe("handleGeneratedSuggestion", () => {
 
     await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-6", result, true);
 
-    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "REJECT_SUGGESTION", id: "lane-6" });
-    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "SYNC_MANAGED_SESSION", id: "lane-6", managed });
+    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "SUGGESTION_READY", id: "lane-6", result });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "REJECT_SUGGESTION", id: "lane-6" });
+    expect(dispatch).toHaveBeenNthCalledWith(3, { type: "SYNC_MANAGED_SESSION", id: "lane-6", managed });
     expect(service.executeSuggestion).not.toHaveBeenCalled();
     expect(service.maybeNotifyIntervention).not.toHaveBeenCalled();
   });
@@ -798,8 +825,9 @@ describe("handleGeneratedSuggestion", () => {
 
     await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-7", result, true);
 
-    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "REJECT_SUGGESTION", id: "lane-7" });
-    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "SYNC_MANAGED_SESSION", id: "lane-7", managed });
+    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "SUGGESTION_READY", id: "lane-7", result });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "REJECT_SUGGESTION", id: "lane-7" });
+    expect(dispatch).toHaveBeenNthCalledWith(3, { type: "SYNC_MANAGED_SESSION", id: "lane-7", managed });
     expect(service.executeSuggestion).not.toHaveBeenCalled();
     expect(service.maybeNotifyIntervention).not.toHaveBeenCalled();
   });
@@ -861,8 +889,9 @@ describe("handleGeneratedSuggestion", () => {
 
     await handleGeneratedSuggestion(dispatch, service as any, managed, "lane-9", result, true);
 
-    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "REJECT_SUGGESTION", id: "lane-9" });
-    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "SYNC_MANAGED_SESSION", id: "lane-9", managed });
+    expect(dispatch).toHaveBeenNthCalledWith(1, { type: "SUGGESTION_READY", id: "lane-9", result });
+    expect(dispatch).toHaveBeenNthCalledWith(2, { type: "REJECT_SUGGESTION", id: "lane-9" });
+    expect(dispatch).toHaveBeenNthCalledWith(3, { type: "SYNC_MANAGED_SESSION", id: "lane-9", managed });
     expect(service.executeSuggestion).not.toHaveBeenCalled();
     expect(service.maybeNotifyIntervention).not.toHaveBeenCalled();
   });
@@ -1101,6 +1130,71 @@ describe("useEventBridge", () => {
     expect(dispatch).toHaveBeenCalledWith({ type: "START_GENERATING", id: session.id });
   });
 
+  it("does not autonomously recheck a waiting lane when the dismissed noop is blocked on developer retest", async () => {
+    vi.useFakeTimers();
+    const session = createBridgeSession({
+      timeline: [
+        {
+          id: "remote-1",
+          kind: "remote-turn",
+          timestamp: 1,
+          provider: "codex",
+          text: "The fix is deployed; waiting on the developer to retry the live path.",
+        },
+        {
+          id: "noop-1",
+          kind: "local-suggestion",
+          timestamp: 2,
+          text: "",
+          confidence: 94,
+          reasoning: "Blocked on developer retest — fix deployed, needs-review surfaced, no new turns.",
+          state: "dismissed",
+        },
+      ],
+    });
+    session.managed.awaitingInput = false;
+    const dispatch = vi.fn();
+    const service = createService();
+    vi.spyOn(config, "loadProjectContext").mockReturnValue({
+      name: "proj",
+      directory: "/tmp/myproject",
+      goals: [],
+      milestones: [],
+      techStack: [],
+      notes: "",
+      intentBrief: {
+        projectStory: "Keep working until the real ledger closes.",
+        primaryUsers: ["operators"],
+        definitionOfDone: ["Open ledger items are proven."],
+        acceptanceChecks: ["Roscoe keeps slices moving."],
+        successSignals: ["No idle waiting while meaningful work remains."],
+        acceptanceLedger: [
+          { label: "Hosted proof promoted", status: "open", evidence: [], notes: "" },
+        ],
+        deliveryPillars: {
+          frontend: [],
+          backend: [],
+          unitComponentTests: [],
+          e2eTests: [],
+        },
+        coverageMechanism: [],
+        nonGoals: [],
+        constraints: [],
+        uiDirection: "",
+      },
+    } as any);
+
+    render(React.createElement(BridgeHarness, { sessions: new Map([[session.id, session]]), dispatch, service, autoMode: true }));
+    await flushEffects();
+    await flushEffects();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushEffects();
+    await flushEffects();
+
+    expect(service.generateSuggestion).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalledWith({ type: "START_GENERATING", id: session.id });
+  });
+
   it("re-blocks a lane on mount when the last remote turn is a pause acknowledgement", async () => {
     const session = createBridgeSession({
       timeline: [{
@@ -1327,7 +1421,7 @@ describe("useEventBridge", () => {
     let resolveSuggestion: ((value: { text: string; confidence: number; reasoning: string; }) => void) | null = null;
     const service = createService({
       generateSuggestion: vi.fn().mockImplementation(
-        () => new Promise((resolve) => {
+        () => new Promise<{ text: string; confidence: number; reasoning: string }>((resolve) => {
           resolveSuggestion = resolve;
         }),
       ),
@@ -1340,7 +1434,11 @@ describe("useEventBridge", () => {
       message: "Preview queued",
       link: null,
     } as any;
-    resolveSuggestion?.({
+    if (!resolveSuggestion) {
+      throw new Error("Suggestion resolver was not captured for the preview-queue test.");
+    }
+    const resolvePendingSuggestion = resolveSuggestion as (value: { text: string; confidence: number; reasoning: string }) => void;
+    resolvePendingSuggestion({
       text: "Ship it.",
       confidence: 95,
       reasoning: "Preview looks ready.",

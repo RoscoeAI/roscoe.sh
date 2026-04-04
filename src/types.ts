@@ -9,6 +9,7 @@ import {
 } from "./llm-runtime.js";
 import { OnboardingMode } from "./config.js";
 import type { Message } from "./conversation-tracker.js";
+import type { RoscoeDecision } from "./roscoe-draft.js";
 
 // ── Session Types ──────────────────────────────────────────
 
@@ -131,6 +132,7 @@ export interface RemoteTurnEntry extends TranscriptEntryBase {
 
 export interface LocalSuggestionEntry extends TranscriptEntryBase {
   kind: "local-suggestion";
+  decision?: RoscoeDecision;
   text: string;
   confidence: number;
   reasoning: string;

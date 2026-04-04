@@ -396,8 +396,9 @@ export class SessionMonitor extends EventEmitter {
   private handleToolActivityMetadata(parsed: Record<string, unknown>, profile: HeadlessProfile): void {
     const protocol = detectProtocol(profile);
 
-    if (protocol === "claude") {
+    if (protocol === "claude" || protocol === "qwen") {
       if (parsed.type === "assistant") {
+        if (protocol === "qwen") return;
         const message = parsed.message as Record<string, unknown> | undefined;
         const content = Array.isArray(message?.content) ? message.content : [];
         for (const item of content) {
@@ -489,6 +490,24 @@ export class SessionMonitor extends EventEmitter {
       const detail = formatToolDetail(parsed.tool_name, parameters);
       dbg("event", `tool-use: ${parsed.tool_name}${detail ? ` (${detail})` : ""}`);
       this.emit("tool-activity", parsed.tool_name, detail);
+      return;
+    }
+
+    if (protocol === "kimi" && parsed.role === "assistant" && Array.isArray(parsed.tool_calls)) {
+      for (const call of parsed.tool_calls) {
+        if (!call || typeof call !== "object") continue;
+        const typedCall = call as Record<string, unknown>;
+        const fn = typedCall.function && typeof typedCall.function === "object"
+          ? typedCall.function as Record<string, unknown>
+          : null;
+        const name = typeof fn?.name === "string" ? fn.name : null;
+        if (!name) continue;
+        const argumentsJson = typeof fn?.arguments === "string" ? fn.arguments : "";
+        const detail = formatToolDetail(name, argumentsJson);
+        dbg("event", `tool-use: ${name}${detail ? ` (${detail})` : ""}`);
+        this.emit("tool-activity", name, detail);
+      }
+      return;
     }
   }
 

@@ -18,7 +18,11 @@ const parsed = provider === "codex"
   ? parseCodexArgs(args)
   : provider === "gemini"
     ? parseGeminiArgs(args)
-    : parseClaudeArgs(args);
+    : provider === "qwen"
+      ? parseQwenArgs(args)
+    : provider === "kimi"
+      ? parseKimiArgs(args)
+      : parseClaudeArgs(args);
 const { callIndex, call } = await reserveMatchingCallIndex(
   scenario.calls || [],
   statePath,
@@ -59,6 +63,10 @@ if (!shouldSkipTurnOutput(call)) {
     await emitCodex(call, callIndex);
   } else if (provider === "gemini") {
     await emitGemini(call, callIndex);
+  } else if (provider === "qwen") {
+    await emitQwen(call, callIndex);
+  } else if (provider === "kimi") {
+    await emitKimi(call, callIndex);
   } else {
     await emitClaude(call, callIndex);
   }
@@ -210,6 +218,137 @@ async function emitGemini(call, index) {
   });
 }
 
+async function emitKimi(call, index) {
+  process.stdout.write(`To resume this session: kimi -r ${call.sessionId || `mock-kimi-${index}`}\n`);
+
+  if (call.toolActivity || call.thinking) {
+    await sleep(call.chunkDelayMs || 0);
+    println({
+      role: "assistant",
+      ...(call.toolActivity
+        ? {
+            tool_calls: [
+              {
+                function: {
+                  name: call.toolActivity,
+                  arguments: JSON.stringify(call.toolParameters || {}),
+                },
+              },
+            ],
+          }
+        : {}),
+      content: call.thinking
+        ? [{ type: "think", think: call.thinking }]
+        : [],
+    });
+  }
+
+  if (call.skipCompletion) {
+    return;
+  }
+
+  await sleep(call.chunkDelayMs || 0);
+  println({
+    role: "assistant",
+    content: getChunks(call.text || "").map((chunk) => ({
+      type: "text",
+      text: chunk,
+    })),
+  });
+}
+
+async function emitQwen(call, index) {
+  println({
+    type: "system",
+    subtype: "init",
+    session_id: call.sessionId || `mock-qwen-${index}`,
+    model: "coder-model",
+    permission_mode: "yolo",
+  });
+
+  if (call.thinking) {
+    await sleep(call.chunkDelayMs || 0);
+    println({
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        delta: {
+          type: "thinking_delta",
+          thinking: call.thinking,
+        },
+      },
+    });
+  }
+
+  if (call.toolActivity) {
+    await sleep(call.chunkDelayMs || 0);
+    println({
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          name: call.toolActivity,
+          input: call.toolParameters || {},
+        },
+      },
+    });
+  }
+
+  for (const chunk of getChunks(call.text || "")) {
+    await sleep(call.chunkDelayMs || 0);
+    println({
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        delta: {
+          type: "text_delta",
+          text: chunk,
+        },
+      },
+    });
+  }
+
+  if (call.skipCompletion) {
+    return;
+  }
+
+  await sleep(call.chunkDelayMs || 0);
+  println({
+    type: "assistant",
+    message: {
+      content: [
+        ...(call.thinking ? [{ type: "thinking", thinking: call.thinking }] : []),
+        ...(call.toolActivity
+          ? [{ type: "tool_use", name: call.toolActivity, input: call.toolParameters || {} }]
+          : []),
+        ...getChunks(call.text || "").map((chunk) => ({
+          type: "text",
+          text: chunk,
+        })),
+      ],
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+      },
+      stop_reason: "end_turn",
+    },
+  });
+
+  await sleep(call.chunkDelayMs || 0);
+  println({
+    type: "result",
+    subtype: "success",
+    session_id: call.sessionId || `mock-qwen-${index}`,
+    result: getText(call.text),
+    usage: {
+      input_tokens: 1,
+      output_tokens: 1,
+    },
+  });
+}
+
 function getChunks(text) {
   if (!text) return [];
   if (Array.isArray(text)) return text;
@@ -302,6 +441,72 @@ function parseCodexArgs(args) {
 }
 
 function parseGeminiArgs(args) {
+  const promptIndex = args.indexOf("-p");
+  const resumeIndex = args.indexOf("--resume");
+  return {
+    prompt: promptIndex === -1 ? "" : args[promptIndex + 1] || "",
+    resumeId: resumeIndex === -1 ? null : args[resumeIndex + 1] || null,
+  };
+}
+
+function parseQwenArgs(args) {
+  const valueOptions = new Set([
+    "-m",
+    "--model",
+    "-p",
+    "--prompt",
+    "--approval-mode",
+    "-o",
+    "--output-format",
+    "--resume",
+    "--session-id",
+    "--input-format",
+    "--auth-type",
+    "--channel",
+    "--sandbox-image",
+    "--extensions",
+    "--include-directories",
+    "--add-dir",
+    "--allowed-mcp-server-names",
+    "--allowed-tools",
+    "--openai-api-key",
+    "--openai-base-url",
+    "--tavily-api-key",
+    "--google-api-key",
+    "--google-search-engine-id",
+    "--web-search-default",
+    "--system-prompt",
+    "--append-system-prompt",
+    "--max-session-turns",
+    "--core-tools",
+    "--exclude-tools",
+  ]);
+  const promptIndex = args.indexOf("-p") !== -1 ? args.indexOf("-p") : args.indexOf("--prompt");
+  const resumeIndex = args.indexOf("--resume");
+  const positional = [];
+
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i];
+    if (valueOptions.has(value)) {
+      i += 1;
+      continue;
+    }
+    if (value === "--sandbox" || value === "--include-partial-messages" || value === "--yolo" || value === "--continue") {
+      continue;
+    }
+    if (value.startsWith("-")) {
+      continue;
+    }
+    positional.push(value);
+  }
+
+  return {
+    prompt: promptIndex === -1 ? positional.at(-1) || "" : args[promptIndex + 1] || "",
+    resumeId: resumeIndex === -1 ? null : args[resumeIndex + 1] || null,
+  };
+}
+
+function parseKimiArgs(args) {
   const promptIndex = args.indexOf("-p");
   const resumeIndex = args.indexOf("--resume");
   return {

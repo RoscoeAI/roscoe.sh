@@ -10,6 +10,7 @@ import {
   listAuthProfiles,
   listRegisteredProjects,
 } from "./config.js";
+import { enableDebug } from "./debug-log.js";
 import { WorktreeManager } from "./worktree-manager.js";
 import App from "./app.js";
 import { detectProtocol, LLMProtocol, RuntimeControlSettings } from "./llm-runtime.js";
@@ -79,12 +80,13 @@ program
     "AI co-pilot that monitors LLM conversations, automates browser interactions, and orchestrates multi-agent workflows",
   )
   .version("0.4.0")
-  .option("--debug", "Enable debug logging to stderr");
+  .option("--debug", "Enable debug logging to ~/.roscoe/debug.log");
 
 // ── default action (interactive TUI) ──────────────────────
 
 program.action(() => {
   const debug = program.opts().debug === true;
+  if (debug) enableDebug();
   render(React.createElement(App, { initialScreen: "home", debug }));
 });
 
@@ -110,10 +112,13 @@ program
   .option("--codex-approval <policy>", "Codex approval policy override")
   .option("--codex-dangerous", "Run Codex workers with --dangerously-bypass-approvals-and-sandbox")
   .action((specs: string[], options: Record<string, unknown>) => {
+    const debug = program.opts().debug === true;
+    if (debug) enableDebug();
     render(
       React.createElement(App, {
         initialScreen: "session-view",
         startSpecs: specs,
+        debug,
         initialAutoMode: options.auto === true,
         startRuntimeOverrides: buildProviderRuntimeOverrides(options),
       }),
@@ -140,6 +145,7 @@ program
   .option("--codex-dangerous", "Run Codex onboarding with --dangerously-bypass-approvals-and-sandbox")
   .action((dir: string, options: Record<string, unknown>) => {
     const debug = program.opts().debug === true;
+    if (debug) enableDebug();
     const overrides = buildProviderRuntimeOverrides(options);
     const inferredProvider = overrides.codex
       ? "codex"

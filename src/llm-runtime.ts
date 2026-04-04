@@ -2,7 +2,7 @@ import { ChildProcess, spawn } from "child_process";
 import { basename } from "path";
 import { createInterface } from "readline";
 
-export type LLMProtocol = "claude" | "codex" | "gemini";
+export type LLMProtocol = "claude" | "codex" | "qwen" | "gemini" | "kimi";
 export type RuntimeExecutionMode = "safe" | "accelerated";
 export type RuntimeTuningMode = "manual" | "auto";
 
@@ -67,6 +67,7 @@ export interface ProviderAdapter {
   label: string;
   defaultProfileName: string;
   topModel: string;
+  knownModels: string[];
   reasoningOptions: string[];
   defaultWorkerRuntime: RuntimeControlSettings;
   acceleratedWorkerRuntime: RuntimeControlSettings;
@@ -221,6 +222,64 @@ function buildGeminiTurnCommand(
     prompt,
     "--output-format",
     "stream-json",
+    ...profile.args,
+  ];
+
+  return {
+    command: profile.command,
+    args,
+    env,
+  };
+}
+
+function buildQwenTurnCommand(
+  profile: HeadlessProfile,
+  prompt: string,
+  sessionId?: string | null,
+): SpawnSpec {
+  const env = { ...(profile.env ?? {}), ...process.env };
+  const runtime = profile.runtime;
+  const args = [
+    ...(runtime?.model ? ["-m", runtime.model] : []),
+    ...(runtime?.executionMode !== "accelerated" ? ["--sandbox"] : []),
+    "--approval-mode",
+    "yolo",
+    "--output-format",
+    "stream-json",
+    "--include-partial-messages",
+    ...(sessionId ? ["--resume", sessionId] : []),
+    ...profile.args,
+    prompt,
+  ];
+
+  return {
+    command: profile.command,
+    args,
+    env,
+  };
+}
+
+function buildKimiTurnCommand(
+  profile: HeadlessProfile,
+  prompt: string,
+  sessionId?: string | null,
+): SpawnSpec {
+  const env = { ...(profile.env ?? {}), ...process.env };
+  const runtime = profile.runtime;
+  const args = [
+    ...(runtime?.model ? ["-m", runtime.model] : []),
+    ...(runtime?.executionMode !== "accelerated" ? ["--plan"] : []),
+    ...(runtime?.reasoningEffort === "low"
+      ? ["--no-thinking"]
+      : runtime?.reasoningEffort && runtime.reasoningEffort !== "medium"
+        ? ["--thinking"]
+        : []),
+    "--print",
+    "--output-format",
+    "stream-json",
+    ...(sessionId ? ["--resume", sessionId] : []),
+    "-p",
+    prompt,
     ...profile.args,
   ];
 
@@ -462,6 +521,159 @@ function parseGeminiOneShotLine(parsed: Record<string, unknown>): OneShotLineRes
   return {};
 }
 
+function parseQwenSessionLine(
+  parsed: Record<string, unknown>,
+  handlers: SessionLineHandlers,
+  streamState?: ClaudeStreamState,
+): void {
+  const type = parsed.type as string | undefined;
+
+  if (type === "system" && parsed.subtype === "init" && typeof parsed.session_id === "string") {
+    handlers.onSessionId?.(parsed.session_id);
+    return;
+  }
+
+  if (type === "assistant") {
+    const message = parsed.message as Record<string, unknown> | undefined;
+    const content = Array.isArray(message?.content) ? message.content : [];
+
+    for (const item of content) {
+      if (!item || typeof item !== "object") continue;
+      const block = item as Record<string, unknown>;
+      if (block.type === "text" && typeof block.text === "string") {
+        if (!streamState?.sawTextDelta) {
+          handlers.onText?.(block.text);
+        }
+      } else if (block.type === "thinking" && typeof block.thinking === "string") {
+        if (!streamState?.sawThinkingDelta) {
+          handlers.onThinking?.(block.thinking);
+        }
+      }
+    }
+
+    const usage = normalizeRuntimeUsage(message?.usage);
+    if (usage) {
+      handlers.onUsage?.(usage);
+    }
+
+    if (message?.stop_reason === "end_turn") {
+      handlers.onTurnComplete?.();
+    }
+    return;
+  }
+
+  if (type === "stream_event") {
+    const event = parsed.event as Record<string, unknown> | undefined;
+    const eventType = event?.type as string | undefined;
+
+    if (eventType === "content_block_delta") {
+      const delta = event?.delta as Record<string, unknown> | undefined;
+      if (delta?.type === "text_delta" && typeof delta.text === "string") {
+        if (streamState) streamState.sawTextDelta = true;
+        handlers.onText?.(delta.text);
+      } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
+        if (streamState) streamState.sawThinkingDelta = true;
+        handlers.onThinking?.(delta.thinking);
+      }
+      return;
+    }
+
+    if (eventType === "content_block_start") {
+      const block = event?.content_block as Record<string, unknown> | undefined;
+      if (block?.type === "tool_use" && typeof block.name === "string") {
+        handlers.onToolActivity?.(block.name);
+      }
+    }
+    return;
+  }
+
+  if (type === "result") {
+    if (typeof parsed.session_id === "string") {
+      handlers.onSessionId?.(parsed.session_id);
+    }
+    const usage = normalizeRuntimeUsage(parsed.usage);
+    if (usage) {
+      handlers.onUsage?.(usage);
+    }
+    handlers.onTurnComplete?.();
+  }
+}
+
+function parseQwenOneShotLine(parsed: Record<string, unknown>): OneShotLineResult {
+  if (parsed.type === "assistant") {
+    const message = parsed.message as Record<string, unknown> | undefined;
+    const content = Array.isArray(message?.content) ? message.content : [];
+    const text = content
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .filter((item) => item.type === "text" && typeof item.text === "string")
+      .map((item) => item.text as string)
+      .join("");
+    if (text) {
+      return { replaceText: text };
+    }
+    return {};
+  }
+
+  if (parsed.type === "stream_event") {
+    const event = parsed.event as Record<string, unknown> | undefined;
+    const delta = event?.delta as Record<string, unknown> | undefined;
+    if (event?.type === "content_block_delta" && delta?.type === "text_delta" && typeof delta.text === "string") {
+      return { appendText: delta.text };
+    }
+    return {};
+  }
+
+  if (parsed.type === "result" && typeof parsed.result === "string") {
+    return { replaceText: parsed.result };
+  }
+
+  return {};
+}
+
+function parseKimiSessionLine(
+  parsed: Record<string, unknown>,
+  handlers: SessionLineHandlers,
+): void {
+  if (parsed.role === "assistant") {
+    const content = Array.isArray(parsed.content) ? parsed.content : [];
+    let sawText = false;
+
+    for (const item of content) {
+      if (!item || typeof item !== "object") continue;
+      const block = item as Record<string, unknown>;
+      if (block.type === "text" && typeof block.text === "string") {
+        sawText = true;
+        handlers.onText?.(block.text);
+      } else if ((block.type === "think" || block.type === "thinking") && typeof block.think === "string") {
+        handlers.onThinking?.(block.think);
+      } else if ((block.type === "think" || block.type === "thinking") && typeof block.thinking === "string") {
+        handlers.onThinking?.(block.thinking);
+      }
+    }
+
+    const toolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
+    if (toolCalls.length === 0 && sawText) {
+      handlers.onTurnComplete?.();
+    }
+  }
+}
+
+function parseKimiOneShotLine(parsed: Record<string, unknown>): OneShotLineResult {
+  if (parsed.role === "assistant") {
+    const content = Array.isArray(parsed.content) ? parsed.content : [];
+    const text = content
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .filter((item) => item.type === "text" && typeof item.text === "string")
+      .map((item) => item.text as string)
+      .join("");
+    if (text) {
+      return { replaceText: text };
+    }
+  }
+
+  return {};
+}
+
 function summarizeClaudeRuntimeFlags(runtime: RuntimeControlSettings | null | undefined): string[] {
   if (runtime?.dangerouslySkipPermissions) {
     return ["dangerous"];
@@ -476,6 +688,17 @@ function summarizeCodexRuntimeFlags(runtime: RuntimeControlSettings | null | und
   const parts: string[] = [];
   if (runtime?.sandboxMode) parts.push(runtime.sandboxMode);
   if (runtime?.approvalPolicy) parts.push(runtime.approvalPolicy);
+  return parts;
+}
+
+function summarizeKimiRuntimeFlags(runtime: RuntimeControlSettings | null | undefined): string[] {
+  const parts: string[] = [];
+  if (runtime?.executionMode !== "accelerated") parts.push("plan");
+  if (runtime?.reasoningEffort === "low") {
+    parts.push("no-thinking");
+  } else if (runtime?.reasoningEffort && runtime.reasoningEffort !== "medium") {
+    parts.push("thinking");
+  }
   return parts;
 }
 
@@ -521,6 +744,7 @@ const CLAUDE_ADAPTER: ProviderAdapter = {
   label: "Claude",
   defaultProfileName: "claude-code",
   topModel: "claude-opus-4-6",
+  knownModels: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4"],
   reasoningOptions: ["low", "medium", "high", "max"],
   defaultWorkerRuntime: {
     executionMode: "safe",
@@ -563,6 +787,7 @@ const CODEX_ADAPTER: ProviderAdapter = {
   label: "Codex",
   defaultProfileName: "codex",
   topModel: "gpt-5.4",
+  knownModels: ["gpt-5.4", "gpt-5.4-mini"],
   reasoningOptions: ["low", "medium", "high", "xhigh"],
   defaultWorkerRuntime: {
     executionMode: "safe",
@@ -602,11 +827,52 @@ const CODEX_ADAPTER: ProviderAdapter = {
   applyManagedArgs: applyCodexManagedArgs,
 };
 
+const QWEN_ADAPTER: ProviderAdapter = {
+  id: "qwen",
+  label: "Qwen",
+  defaultProfileName: "qwen",
+  topModel: "coder-model",
+  knownModels: ["coder-model"],
+  reasoningOptions: ["low", "medium", "high"],
+  defaultWorkerRuntime: {
+    executionMode: "safe",
+    tuningMode: "auto",
+    model: "coder-model",
+    reasoningEffort: "high",
+  },
+  acceleratedWorkerRuntime: {
+    executionMode: "accelerated",
+    tuningMode: "auto",
+    model: "coder-model",
+    reasoningEffort: "high",
+  },
+  defaultOnboardingRuntime: {
+    executionMode: "safe",
+    tuningMode: "auto",
+    model: "coder-model",
+    reasoningEffort: "high",
+  },
+  defaultReasoningEffort: "high",
+  onboardingReasoningEffort: "high",
+  frontendReasoningEffort: "medium",
+  efficientFrontendReasoningEffort: "low",
+  deepReasoningEffort: "high",
+  efficientDeepReasoningEffort: "high",
+  generalReasoningEffort: "high",
+  efficientGeneralReasoningEffort: "medium",
+  buildTurnCommand: buildQwenTurnCommand,
+  parseSessionLine: (parsed, handlers, streamState) => parseQwenSessionLine(parsed, handlers, streamState as ClaudeStreamState | undefined),
+  parseOneShotLine: parseQwenOneShotLine,
+  summarizeRuntimeFlags: (runtime) => runtime?.executionMode !== "accelerated" ? ["sandbox"] : [],
+  applyManagedArgs: (args) => [...args],
+};
+
 const GEMINI_ADAPTER: ProviderAdapter = {
   id: "gemini",
   label: "Gemini",
   defaultProfileName: "gemini",
   topModel: "gemini-3-flash-preview",
+  knownModels: ["gemini-3-flash-preview", "gemini-3-pro", "gemini-2.5-pro"],
   reasoningOptions: ["low", "medium", "high"],
   defaultWorkerRuntime: {
     executionMode: "safe",
@@ -641,18 +907,64 @@ const GEMINI_ADAPTER: ProviderAdapter = {
   applyManagedArgs: (args) => [...args],
 };
 
+const KIMI_ADAPTER: ProviderAdapter = {
+  id: "kimi",
+  label: "Kimi",
+  defaultProfileName: "kimi",
+  topModel: "kimi-for-coding",
+  knownModels: ["kimi-for-coding"],
+  reasoningOptions: ["low", "medium", "high"],
+  defaultWorkerRuntime: {
+    executionMode: "safe",
+    tuningMode: "auto",
+    model: "kimi-for-coding",
+    reasoningEffort: "high",
+  },
+  acceleratedWorkerRuntime: {
+    executionMode: "accelerated",
+    tuningMode: "auto",
+    model: "kimi-for-coding",
+    reasoningEffort: "high",
+  },
+  defaultOnboardingRuntime: {
+    executionMode: "safe",
+    tuningMode: "auto",
+    model: "kimi-for-coding",
+    reasoningEffort: "high",
+  },
+  defaultReasoningEffort: "high",
+  onboardingReasoningEffort: "high",
+  frontendReasoningEffort: "medium",
+  efficientFrontendReasoningEffort: "low",
+  deepReasoningEffort: "high",
+  efficientDeepReasoningEffort: "high",
+  generalReasoningEffort: "high",
+  efficientGeneralReasoningEffort: "medium",
+  buildTurnCommand: buildKimiTurnCommand,
+  parseSessionLine: parseKimiSessionLine,
+  parseOneShotLine: parseKimiOneShotLine,
+  summarizeRuntimeFlags: summarizeKimiRuntimeFlags,
+  applyManagedArgs: (args) => [...args],
+};
+
 const PROVIDER_ADAPTERS: Record<LLMProtocol, ProviderAdapter> = {
   claude: CLAUDE_ADAPTER,
   codex: CODEX_ADAPTER,
+  qwen: QWEN_ADAPTER,
+  kimi: KIMI_ADAPTER,
   gemini: GEMINI_ADAPTER,
 };
 
 export function isLLMProtocol(value: unknown): value is LLMProtocol {
-  return value === "claude" || value === "codex" || value === "gemini";
+  return value === "claude" || value === "codex" || value === "qwen" || value === "gemini" || value === "kimi";
 }
 
 export function getProviderAdapter(protocol: LLMProtocol): ProviderAdapter {
   return PROVIDER_ADAPTERS[protocol];
+}
+
+export function getKnownModels(protocol: LLMProtocol): string[] {
+  return [...getProviderAdapter(protocol).knownModels];
 }
 
 export function listProviderAdapters(): ProviderAdapter[] {
@@ -664,6 +976,8 @@ export function detectProtocol(profile: Pick<HeadlessProfile, "command" | "name"
 
   const hint = `${basename(profile.command)} ${profile.name}`.toLowerCase();
   if (hint.includes("codex")) return "codex";
+  if (hint.includes("qwen")) return "qwen";
+  if (hint.includes("kimi")) return "kimi";
   if (hint.includes("gemini")) return "gemini";
   return "claude";
 }
@@ -710,6 +1024,14 @@ export function parseSessionStreamLine(
   streamState?: Record<string, unknown>,
 ): void {
   if (!line.trim()) return;
+
+  if (detectProtocol(profile) === "kimi") {
+    const sessionMatch = line.match(/To resume this session:\s*kimi\s+-r\s+([A-Za-z0-9-]+)/i);
+    if (sessionMatch?.[1]) {
+      handlers.onSessionId?.(sessionMatch[1]);
+      return;
+    }
+  }
 
   let parsed: Record<string, unknown>;
   try {

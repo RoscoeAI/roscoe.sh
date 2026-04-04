@@ -2132,7 +2132,13 @@ describe("config", () => {
             enabled: true,
             webSearch: false,
           },
+          qwen: {
+            enabled: true,
+          },
           gemini: {
+            enabled: true,
+          },
+          kimi: {
             enabled: true,
           },
         },
@@ -2203,7 +2209,13 @@ describe("config", () => {
             enabled: true,
             webSearch: true,
           },
+          qwen: {
+            enabled: true,
+          },
           gemini: {
+            enabled: false,
+          },
+          kimi: {
             enabled: false,
           },
         },
@@ -2242,7 +2254,9 @@ describe("config", () => {
         providers: {
           claude: { enabled: true, brief: false, ide: false, chrome: false },
           codex: { enabled: true, webSearch: false },
+          qwen: { enabled: true },
           gemini: { enabled: true },
+          kimi: { enabled: true },
         },
         behavior: {
           autoHealMetadata: true,
@@ -2302,6 +2316,9 @@ describe("config", () => {
           gemini: {
             enabled: "false",
           },
+          kimi: {
+            enabled: "false",
+          },
         },
         behavior: {
           autoHealMetadata: 0,
@@ -2337,7 +2354,13 @@ describe("config", () => {
             enabled: true,
             webSearch: false,
           },
+          qwen: {
+            enabled: true,
+          },
           gemini: {
+            enabled: true,
+          },
+          kimi: {
             enabled: true,
           },
         },

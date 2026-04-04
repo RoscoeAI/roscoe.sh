@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Box, Text } from "ink";
 import { Select, TextInput } from "@inkjs/ui";
-import { getProviderAdapter, LLMProtocol, RuntimeControlSettings, RuntimeExecutionMode, RuntimeTuningMode } from "../llm-runtime.js";
+import { getKnownModels, getProviderAdapter, LLMProtocol, RuntimeControlSettings, RuntimeExecutionMode, RuntimeTuningMode } from "../llm-runtime.js";
 import { ResponderApprovalMode, TokenEfficiencyMode, VerificationCadence, WorkerGovernanceMode } from "../config.js";
 import {
   formatTokenEfficiencyLabel,
@@ -33,9 +33,11 @@ type RuntimeEditorStep =
   | "guild-provider"
   | "guild-mode"
   | "guild-model"
+  | "guild-model-custom"
   | "guild-effort"
   | "roscoe-provider"
   | "roscoe-model"
+  | "roscoe-model-custom"
   | "roscoe-effort"
   | "execution"
   | "governance"
@@ -43,18 +45,20 @@ type RuntimeEditorStep =
   | "efficiency"
   | "approval";
 
+const CUSTOM_MODEL_VALUE = "__custom__";
+
 function getStepLabel(step: RuntimeEditorStep): string {
   return step === "guild-provider"
     ? "Guild provider"
     : step === "guild-mode"
     ? "Guild runtime"
-    : step === "guild-model"
+    : step === "guild-model" || step === "guild-model-custom"
       ? "Guild model"
       : step === "guild-effort"
         ? "Guild reasoning"
         : step === "roscoe-provider"
           ? "Roscoe provider"
-          : step === "roscoe-model"
+          : step === "roscoe-model" || step === "roscoe-model-custom"
           ? "Roscoe model"
           : step === "roscoe-effort"
             ? "Roscoe reasoning"
@@ -75,13 +79,17 @@ function getStepHelp(step: RuntimeEditorStep): string {
     : step === "guild-mode"
     ? "Decide whether Roscoe chooses the Guild worker's runtime dynamically or you pin it manually."
     : step === "guild-model"
-      ? "Choose the pinned Guild model."
+      ? "Choose the pinned Guild model from Roscoe's known IDs, or switch to a custom model ID."
+      : step === "guild-model-custom"
+        ? "Type the pinned Guild model ID."
       : step === "guild-effort"
         ? "Choose the pinned Guild reasoning level."
         : step === "roscoe-provider"
           ? "Choose which provider Roscoe should use for drafting replies."
           : step === "roscoe-model"
-          ? "Choose Roscoe's preferred responder model."
+            ? "Choose Roscoe's preferred responder model from Roscoe's known IDs, or switch to a custom model ID."
+            : step === "roscoe-model-custom"
+              ? "Type Roscoe's preferred responder model ID."
           : step === "roscoe-effort"
             ? "Choose Roscoe's preferred responder reasoning level."
             : step === "execution"
@@ -103,13 +111,13 @@ function getCurrentValueLabel(
     ? `Guild provider: ${draft.workerProvider}`
     : step === "guild-mode"
     ? (draft.workerTuningMode === "auto" ? "Guild runtime is dynamic" : "Guild runtime is pinned manually")
-    : step === "guild-model"
+    : step === "guild-model" || step === "guild-model-custom"
       ? `Guild model: ${draft.workerModel}`
       : step === "guild-effort"
         ? `Guild reasoning: ${draft.workerReasoningEffort}`
         : step === "roscoe-provider"
           ? `Roscoe provider: ${draft.responderProvider}`
-          : step === "roscoe-model"
+          : step === "roscoe-model" || step === "roscoe-model-custom"
           ? `Roscoe model: ${draft.responderModel}`
           : step === "roscoe-effort"
             ? `Roscoe reasoning: ${draft.responderReasoningEffort}`
@@ -136,6 +144,23 @@ function getRuntimeIdentity(protocol: LLMProtocol, runtime: RuntimeControlSettin
 
 function getVisibleOptionCount(options: Array<{ label: string; value: string }>): number {
   return Math.max(1, Math.min(options.length, 4));
+}
+
+function getModelOptions(protocol: LLMProtocol, currentModel: string): Array<{ label: string; value: string }> {
+  const knownModels = getKnownModels(protocol);
+  const models = knownModels.includes(currentModel)
+    ? knownModels
+    : [currentModel, ...knownModels];
+
+  return [
+    ...models.map((model, index) => ({
+      label: index === 0 && model === currentModel && !knownModels.includes(currentModel)
+        ? `${model} (current)`
+        : model,
+      value: model,
+    })),
+    { label: "Custom model ID…", value: CUSTOM_MODEL_VALUE },
+  ];
 }
 
 export function createRuntimeEditorDraft(
@@ -260,19 +285,20 @@ export function RuntimeEditorPanel({
   const [step, setStep] = useState<RuntimeEditorStep>("guild-provider");
   const [guildModelInputKey, setGuildModelInputKey] = useState(0);
   const [roscoeModelInputKey, setRoscoeModelInputKey] = useState(0);
-  const providerOrder = Array.from(new Set([...(allowedProviders ?? ["claude", "codex", "gemini"]), protocol, responderProvider]));
+  const providerOrder = Array.from(new Set([...(allowedProviders ?? ["claude", "codex", "qwen", "gemini", "kimi"]), protocol, responderProvider]));
   const providerOptions = providerOrder.map((provider) => ({
     label: getProviderAdapter(provider).label,
     value: provider,
   }));
+  const guildModelOptions = getModelOptions(draft.workerProvider, draft.workerModel);
   const guildEffortOptions = getReasoningOptions(draft.workerProvider).map((value) => ({ label: value, value }));
+  const roscoeModelOptions = getModelOptions(draft.responderProvider, draft.responderModel);
   const roscoeEffortOptions = getReasoningOptions(draft.responderProvider).map((value) => ({ label: value, value }));
 
   const guildModeOptions = [
     { label: "Allow Roscoe to manage the Guild model and reasoning dynamically", value: "auto" },
     { label: "Pin the Guild model and reasoning manually", value: "manual" },
   ];
-  const effortOptions = getReasoningOptions(protocol).map((value) => ({ label: value, value }));
   const governanceOptions = [
     { label: "Roscoe arbiter — Guild checks in before material changes", value: "roscoe-arbiter" },
     { label: "Guild direct — Guild acts directly inside the brief", value: "guild-autonomous" },
@@ -350,7 +376,6 @@ export function RuntimeEditorPanel({
               setDraft((current) => ({ ...current, workerTuningMode: nextMode }));
               if (nextMode === "manual") {
                 setStep("guild-model");
-                setGuildModelInputKey((current) => current + 1);
                 return;
               }
               setStep("guild-effort");
@@ -360,6 +385,27 @@ export function RuntimeEditorPanel({
       )}
 
       {step === "guild-model" && (
+        <Box flexDirection="column">
+          <Select
+            options={guildModelOptions}
+            visibleOptionCount={getVisibleOptionCount(guildModelOptions)}
+            onChange={(value) => {
+              if (value === CUSTOM_MODEL_VALUE) {
+                setGuildModelInputKey((current) => current + 1);
+                setStep("guild-model-custom");
+                return;
+              }
+              setDraft((current) => ({
+                ...current,
+                workerModel: value,
+              }));
+              setStep("guild-effort");
+            }}
+          />
+        </Box>
+      )}
+
+      {step === "guild-model-custom" && (
         <Box flexDirection="column">
           <Box>
             <Text color="yellow">Guild model: </Text>
@@ -411,13 +457,33 @@ export function RuntimeEditorPanel({
                 responderReasoningEffort: nextEffortOptions[nextEffortOptions.length - 1],
               }));
               setStep("roscoe-model");
-              setRoscoeModelInputKey((current) => current + 1);
             }}
           />
         </Box>
       )}
 
       {step === "roscoe-model" && (
+        <Box flexDirection="column">
+          <Select
+            options={roscoeModelOptions}
+            visibleOptionCount={getVisibleOptionCount(roscoeModelOptions)}
+            onChange={(value) => {
+              if (value === CUSTOM_MODEL_VALUE) {
+                setRoscoeModelInputKey((current) => current + 1);
+                setStep("roscoe-model-custom");
+                return;
+              }
+              setDraft((current) => ({
+                ...current,
+                responderModel: value,
+              }));
+              setStep("roscoe-effort");
+            }}
+          />
+        </Box>
+      )}
+
+      {step === "roscoe-model-custom" && (
         <Box flexDirection="column">
           <Box>
             <Text color="yellow">Roscoe model: </Text>

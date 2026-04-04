@@ -52,9 +52,9 @@ describe("SuggestionBar", () => {
     );
     const frame = lastFrame()!;
     expect(frame).toContain("safe mode");
-    expect(frame).toContain("switch Guild execution");
+    expect(frame).toContain("Guild execution");
     expect(frame).toContain("to accelerated");
-    expect(frame).toContain("run the command in another terminal");
+    expect(frame).toContain("broader than Git");
   });
 
   it("shows an explicit parked state for clean Roscoe holds", () => {
@@ -249,6 +249,26 @@ describe("SuggestionBar", () => {
     const frame = lastFrame()!;
     expect(frame).toContain("still needs review");
     expect(frame).toContain("needs review");
+    expect(frame).toContain("[a] send");
+  });
+
+  it("still requires review in auto mode when Roscoe explicitly marks the draft needs-review", () => {
+    const phase: SuggestionPhase = {
+      kind: "ready",
+      result: {
+        decision: "needs-review",
+        text: "Guild pushed `aa29d5a` to `test` — I've reviewed the diff and this is the summary for the developer.",
+        confidence: 90,
+        reasoning: "This is a developer-facing summary, not a message to auto-send back to the Guild.",
+      },
+    };
+    const { lastFrame } = render(
+      <SuggestionBar phase={phase} {...defaultProps} autoMode={true} />,
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain("marked this draft for review before anything is sent");
+    expect(frame).toContain("review draft");
+    expect(frame).not.toContain("Roscoe will send this to the Guild unless you override it.");
     expect(frame).toContain("[a] send");
   });
 

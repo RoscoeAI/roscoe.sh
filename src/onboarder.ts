@@ -34,7 +34,7 @@ const ONBOARDING_CHECKPOINT_FILE = "onboarding-checkpoint.json";
 interface OnboardingCheckpoint {
   version: number;
   mode: OnboardingMode;
-  protocol: "claude" | "codex" | "gemini";
+  protocol: "claude" | "codex" | "qwen" | "gemini" | "kimi";
   profileName: string;
   projectDir: string;
   createdAt: string;
@@ -65,7 +65,7 @@ function parseCheckpoint(raw: unknown): OnboardingCheckpoint | null {
   if (typed.version !== ONBOARDING_CHECKPOINT_VERSION) return null;
 
   const protocol = typed.protocol;
-  if (protocol !== "claude" && protocol !== "codex" && protocol !== "gemini") return null;
+  if (protocol !== "claude" && protocol !== "codex" && protocol !== "qwen" && protocol !== "gemini" && protocol !== "kimi") return null;
   if (typed.mode !== "onboard" && typed.mode !== "refine") return null;
   if (typeof typed.profileName !== "string") return null;
   if (typeof typed.projectDir !== "string") return null;
@@ -604,10 +604,14 @@ export class Onboarder extends EventEmitter {
 
     this.onboardingCheckpoint = this.loadCheckpoint();
     if (this.shouldResumeFromCheckpoint()) {
-      this.interviewAnswers = this.onboardingCheckpoint.interviewAnswers;
-      this.questionHistory = this.onboardingCheckpoint.questionHistory;
-      this.sessionInterviewAnswers = this.onboardingCheckpoint.sessionInterviewAnswers;
-      this.rawTranscript = this.onboardingCheckpoint.rawTranscript;
+      const checkpoint = this.onboardingCheckpoint;
+      if (!checkpoint) {
+        throw new Error("Onboarding checkpoint disappeared while resuming state.");
+      }
+      this.interviewAnswers = checkpoint.interviewAnswers;
+      this.questionHistory = checkpoint.questionHistory;
+      this.sessionInterviewAnswers = checkpoint.sessionInterviewAnswers;
+      this.rawTranscript = checkpoint.rawTranscript;
       this.outputBuffer = "";
       this.rawTranscript = pruneForCheckpoint(this.rawTranscript, 20000);
     }

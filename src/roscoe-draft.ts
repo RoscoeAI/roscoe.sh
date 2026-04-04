@@ -15,6 +15,7 @@ export const MALFORMED_STRUCTURED_DRAFT_REASONING = "Sidecar returned malformed 
 export const LEGACY_STRUCTURED_PARSE_FALLBACK_REASONING = "Could not parse structured response — defaulting to medium confidence";
 
 const SILENT_NOOP_REASONING_PATTERN = /no new guild (turns|activity)|no-activity delta|guild has not responded|sending another message would be (pure )?noise|repeated ci polls are not producing new information|hold silently until a guild turn or ci completion surfaces|only .* (ci results|fresh ci results|hosted results|fresh proof|guild response) .* change the conversation state|wait for fresh proof|existing direction is clear/i;
+const DEVELOPER_RETEST_BLOCKED_PATTERN = /blocked on developer retest|fix deployed, needs-review surfaced/i;
 
 function isRoscoeDecision(value: unknown): value is RoscoeDecision {
   return value === "message"
@@ -152,6 +153,10 @@ export function isSuppressedContinuationGuard(
 
 export function isSilentNoOpReasoning(reasoning: string): boolean {
   return SILENT_NOOP_REASONING_PATTERN.test(reasoning);
+}
+
+export function isDeveloperRetestBlockedReasoning(reasoning: string): boolean {
+  return DEVELOPER_RETEST_BLOCKED_PATTERN.test(reasoning);
 }
 
 export function inferRoscoeDecision(

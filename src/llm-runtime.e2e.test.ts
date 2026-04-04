@@ -20,7 +20,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FIXTURE_PATH = join(__dirname, "..", "test", "fixtures", "mock-llm-cli.mjs");
 
-type MockProvider = "claude" | "codex" | "gemini";
+type MockProvider = "claude" | "codex" | "qwen" | "gemini" | "kimi";
 
 interface MockCall {
   provider: MockProvider;
@@ -41,7 +41,9 @@ interface MockCall {
 interface MockEnv {
   claudeCommand: string;
   codexCommand: string;
+  qwenCommand: string;
   geminiCommand: string;
+  kimiCommand: string;
   logPath: string;
   projectDir: string;
   restore: () => void;
@@ -234,6 +236,136 @@ describe.sequential("provider e2e", () => {
     }
   });
 
+  it("monitors a Qwen-style session across resumed turns", async () => {
+    const env = createMockEnv([
+      {
+        provider: "qwen",
+        promptIncludes: "hello qwen",
+        sessionId: "qwen-session-1",
+        toolActivity: "list_directory",
+        toolParameters: { path: "." },
+        thinking: "Inspecting files",
+        text: ["First qwen ", "turn"],
+      },
+      {
+        provider: "qwen",
+        promptIncludes: "continue qwen",
+        resumeId: "qwen-session-1",
+        sessionId: "qwen-session-1",
+        text: "Second qwen turn",
+      },
+    ]);
+
+    try {
+      const monitor = new SessionMonitor(
+        "worker-qwen",
+        makeProfile("qwen", env.qwenCommand),
+        env.projectDir,
+      );
+
+      const textChunks: string[] = [];
+      const thinkingChunks: string[] = [];
+      const tools: string[] = [];
+      monitor.on("text", (chunk) => {
+        textChunks.push(chunk);
+      });
+      monitor.on("thinking", (chunk) => {
+        thinkingChunks.push(chunk);
+      });
+      monitor.on("tool-activity", (toolName) => {
+        tools.push(toolName);
+      });
+
+      const firstTurn = once(monitor, "turn-complete");
+      monitor.startTurn("hello qwen");
+      await firstTurn;
+
+      expect(monitor.getSessionId()).toBe("qwen-session-1");
+      expect(textChunks.join("")).toContain("First qwen turn");
+      expect(thinkingChunks.join("")).toContain("Inspecting files");
+      expect(tools).toEqual(["list_directory"]);
+
+      monitor.clearTextBuffer();
+
+      const secondTurn = once(monitor, "turn-complete");
+      monitor.sendFollowUp("continue qwen");
+      await secondTurn;
+
+      expect(monitor.getTextBuffer()).toBe("Second qwen turn");
+
+      const calls = readInvocationLog(env.logPath);
+      expect(calls).toHaveLength(2);
+      expect(calls[1].resumeId).toBe("qwen-session-1");
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("monitors a Kimi-style session across resumed turns", async () => {
+    const env = createMockEnv([
+      {
+        provider: "kimi",
+        promptIncludes: "hello kimi",
+        sessionId: "kimi-session-1",
+        toolActivity: "list_directory",
+        toolParameters: { path: "." },
+        thinking: "Inspecting files",
+        text: ["First kimi ", "turn"],
+      },
+      {
+        provider: "kimi",
+        promptIncludes: "continue kimi",
+        resumeId: "kimi-session-1",
+        sessionId: "kimi-session-1",
+        text: "Second kimi turn",
+      },
+    ]);
+
+    try {
+      const monitor = new SessionMonitor(
+        "worker-kimi",
+        makeProfile("kimi", env.kimiCommand),
+        env.projectDir,
+      );
+
+      const textChunks: string[] = [];
+      const thinkingChunks: string[] = [];
+      const tools: string[] = [];
+      monitor.on("text", (chunk) => {
+        textChunks.push(chunk);
+      });
+      monitor.on("thinking", (chunk) => {
+        thinkingChunks.push(chunk);
+      });
+      monitor.on("tool-activity", (toolName) => {
+        tools.push(toolName);
+      });
+
+      const firstTurn = once(monitor, "turn-complete");
+      monitor.startTurn("hello kimi");
+      await firstTurn;
+
+      expect(monitor.getSessionId()).toBe("kimi-session-1");
+      expect(textChunks.join("")).toContain("First kimi turn");
+      expect(thinkingChunks.join("")).toContain("Inspecting files");
+      expect(tools).toEqual(["list_directory"]);
+
+      monitor.clearTextBuffer();
+
+      const secondTurn = once(monitor, "turn-complete");
+      monitor.sendFollowUp("continue kimi");
+      await secondTurn;
+
+      expect(monitor.getTextBuffer()).toBe("Second kimi turn");
+
+      const calls = readInvocationLog(env.logPath);
+      expect(calls).toHaveLength(2);
+      expect(calls[1].resumeId).toBe("kimi-session-1");
+    } finally {
+      env.restore();
+    }
+  });
+
   it.each([
     {
       provider: "claude" as const,
@@ -265,6 +397,19 @@ describe.sequential("provider e2e", () => {
       },
     },
     {
+      provider: "qwen" as const,
+      call: {
+        provider: "qwen" as const,
+        promptIncludesAll: [
+          "This is the persistent hidden Roscoe responder thread",
+          "Respond in this EXACT JSON format",
+          "User: hello",
+        ],
+        sessionId: "qwen-roscoe-1",
+        text: ['{"message":"Ship it","confidence":88,"reasoning":"clear next step","browserActions":[{"type":"snapshot","params":{},"description":"inspect"}]}'],
+      },
+    },
+    {
       provider: "gemini" as const,
       call: {
         provider: "gemini" as const,
@@ -277,6 +422,19 @@ describe.sequential("provider e2e", () => {
         text: ['{"message":"Ship it","confidence":88,"reasoning":"clear next step","browserActions":[{"type":"snapshot","params":{},"description":"inspect"}]}'],
       },
     },
+    {
+      provider: "kimi" as const,
+      call: {
+        provider: "kimi" as const,
+        promptIncludesAll: [
+          "This is the persistent hidden Roscoe responder thread",
+          "Respond in this EXACT JSON format",
+          "User: hello",
+        ],
+        sessionId: "kimi-roscoe-1",
+        text: ['{"message":"Ship it","confidence":88,"reasoning":"clear next step","browserActions":[{"type":"snapshot","params":{},"description":"inspect"}]}'],
+      },
+    },
   ])("generates suggestions through the %s runtime", async ({ provider, call }) => {
     const env = createMockEnv([call]);
 
@@ -285,7 +443,15 @@ describe.sequential("provider e2e", () => {
       const partials: string[] = [];
       const profile = makeProfile(
         provider,
-        provider === "claude" ? env.claudeCommand : provider === "codex" ? env.codexCommand : env.geminiCommand,
+        provider === "claude"
+          ? env.claudeCommand
+          : provider === "codex"
+            ? env.codexCommand
+            : provider === "qwen"
+              ? env.qwenCommand
+            : provider === "gemini"
+              ? env.geminiCommand
+              : env.kimiCommand,
       );
       const responderMonitor = new SessionMonitor(
         `responder-${provider}`,
@@ -324,7 +490,7 @@ describe.sequential("provider e2e", () => {
     }
   }, 15_000);
 
-  it.each(["claude", "codex", "gemini"] as const)("onboards a project with %s", async (provider) => {
+  it.each(["claude", "codex", "qwen", "gemini", "kimi"] as const)("onboards a project with %s", async (provider) => {
     const env = createMockEnv(buildOnboardingScenario(provider));
 
     const previousHome = process.env.HOME;
@@ -336,7 +502,15 @@ describe.sequential("provider e2e", () => {
 
       const profile = makeProfile(
         provider,
-        provider === "claude" ? env.claudeCommand : provider === "codex" ? env.codexCommand : env.geminiCommand,
+        provider === "claude"
+          ? env.claudeCommand
+          : provider === "codex"
+            ? env.codexCommand
+            : provider === "qwen"
+              ? env.qwenCommand
+            : provider === "gemini"
+              ? env.geminiCommand
+              : env.kimiCommand,
       );
       const onboarder = new Onboarder(env.projectDir, false, profile);
 
@@ -453,7 +627,9 @@ function createMockEnv(calls: MockCall[]): MockEnv {
   return {
     claudeCommand: createWrapper(root, "claude", scenarioPath, statePath, logPath),
     codexCommand: createWrapper(root, "codex", scenarioPath, statePath, logPath),
+    qwenCommand: createWrapper(root, "qwen", scenarioPath, statePath, logPath),
     geminiCommand: createWrapper(root, "gemini", scenarioPath, statePath, logPath),
+    kimiCommand: createWrapper(root, "kimi", scenarioPath, statePath, logPath),
     logPath,
     projectDir,
     restore: () => {},
