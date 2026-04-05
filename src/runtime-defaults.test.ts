@@ -315,6 +315,36 @@ describe("runtime-defaults", () => {
     expect(plan.profile.runtime?.reasoningEffort).toBe("xhigh");
   });
 
+  it("does not persist the sentinel default model for Qwen or Kimi auto plans", () => {
+    const qwenPlan = recommendWorkerRuntime({
+      name: "qwen",
+      command: "qwen",
+      args: [],
+      protocol: "qwen",
+      runtime: {
+        tuningMode: "auto",
+        reasoningEffort: "high",
+      },
+    }, "Audit the production bug and ship the fix.", null);
+
+    expect(qwenPlan.profile.runtime?.model).toBeUndefined();
+    expect(qwenPlan.summary).toBe("qwen · high · sandbox");
+
+    const kimiPlan = recommendOnboardingRuntime({
+      name: "kimi",
+      command: "kimi",
+      args: [],
+      protocol: "kimi",
+      runtime: {
+        tuningMode: "auto",
+        reasoningEffort: "medium",
+      },
+    });
+
+    expect(kimiPlan.profile.runtime?.model).toBeUndefined();
+    expect(kimiPlan.summary).toBe("kimi · high · plan · thinking");
+  });
+
   it("keeps onboarding pinned when manual tuning is set", () => {
     const profile: HeadlessProfile = {
       name: "gemini",

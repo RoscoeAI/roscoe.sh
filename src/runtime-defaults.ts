@@ -14,6 +14,7 @@ import {
   RuntimeControlSettings,
   RuntimeTuningMode,
   summarizeRuntime,
+  shouldPassExplicitModel,
 } from "./llm-runtime.js";
 
 export interface RuntimePlan {
@@ -239,20 +240,24 @@ function getDefaultEffort(protocol: LLMProtocol): string {
   return getProviderAdapter(protocol).defaultReasoningEffort;
 }
 
+function getPinnedModelOrUndefined(model: string | undefined): string | undefined {
+  return shouldPassExplicitModel(model) ? model : undefined;
+}
+
 function buildOnboardingRuntimePlan(
   baseProfile: HeadlessProfile,
 ): RuntimePlan {
   const protocol = detectProtocol(baseProfile);
   const adapter = getProviderAdapter(protocol);
   const tuningMode = getRuntimeTuningMode(baseProfile.runtime);
-  const topModel = adapter.topModel;
-  const configuredModel = baseProfile.runtime?.model || topModel;
+  const topModel = getPinnedModelOrUndefined(adapter.topModel);
+  const configuredModel = getPinnedModelOrUndefined(baseProfile.runtime?.model) ?? topModel;
   const configuredEffort = baseProfile.runtime?.reasoningEffort || adapter.onboardingReasoningEffort;
 
   if (tuningMode === "manual") {
     const profile = applyRuntimeSettings(baseProfile, {
       tuningMode,
-      model: configuredModel,
+      ...(configuredModel ? { model: configuredModel } : {}),
       reasoningEffort: configuredEffort,
     });
 
@@ -267,7 +272,7 @@ function buildOnboardingRuntimePlan(
 
   const profile = applyRuntimeSettings(baseProfile, {
     tuningMode,
-    model: topModel,
+    ...(topModel ? { model: topModel } : {}),
     reasoningEffort: adapter.onboardingReasoningEffort,
   });
 
@@ -289,8 +294,8 @@ function buildRuntimePlan(
   const protocol = detectProtocol(baseProfile);
   const adapter = getProviderAdapter(protocol);
   const tuningMode = getRuntimeTuningMode(baseProfile.runtime);
-  const topModel = adapter.topModel;
-  const configuredModel = baseProfile.runtime?.model || topModel;
+  const topModel = getPinnedModelOrUndefined(adapter.topModel);
+  const configuredModel = getPinnedModelOrUndefined(baseProfile.runtime?.model) ?? topModel;
   const configuredEffort = baseProfile.runtime?.reasoningEffort || getDefaultEffort(protocol);
 
   const text = [
@@ -309,7 +314,7 @@ function buildRuntimePlan(
   if (tuningMode === "manual") {
     const profile = applyRuntimeSettings(baseProfile, {
       tuningMode,
-      model: configuredModel,
+      ...(configuredModel ? { model: configuredModel } : {}),
       reasoningEffort: configuredEffort,
     });
 
@@ -354,7 +359,7 @@ function buildRuntimePlan(
 
   const profile = applyRuntimeSettings(baseProfile, {
     tuningMode,
-    model,
+    ...(model ? { model } : {}),
     reasoningEffort,
   });
 

@@ -138,4 +138,12 @@ describe("preview state helpers", () => {
       message: "Preview ready. No preview link was detected yet. Review the latest Guild update, inspect the current app, then press [c] to continue with a follow-up or [b] to clear the break.",
     });
   });
+
+  it("coerces non-string remote text when building the preview summary", () => {
+    expect(buildReadyPreviewState({
+      timeline: [{ id: "remote-3", kind: "remote-turn", timestamp: 1, provider: "qwen", text: { message: "Preview is ready at localhost:4321" } as any }],
+      outputLines: [],
+      summary: null,
+    }).message).toContain("http://localhost:4321");
+  });
 });

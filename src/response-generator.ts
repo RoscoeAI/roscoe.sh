@@ -37,6 +37,7 @@ import {
 } from "./roscoe-draft.js";
 import { SessionMonitor } from "./session-monitor.js";
 import type { Message } from "./conversation-tracker.js";
+import { coerceText } from "./text-coercion.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -61,8 +62,8 @@ const MAX_COMPACT_TRANSCRIPT_LINES = 6;
 
 type ProjectIntentRenderMode = "balanced" | "compact";
 
-function clipText(text: string, maxChars = MAX_COMPACT_TEXT_CHARS): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
+function clipText(text: unknown, maxChars = MAX_COMPACT_TEXT_CHARS): string {
+  const normalized = coerceText(text).replace(/\s+/g, " ").trim();
   if (normalized.length <= maxChars) return normalized;
   return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
@@ -381,8 +382,8 @@ interface FakeGreenSignal {
   source?: "operator-surface" | "deployment-contract" | "acceptance-ledger";
 }
 
-function normalizeComparisonText(text: string): string {
-  return text.toLowerCase().replace(/\s+/g, " ").trim();
+function normalizeComparisonText(text: unknown): string {
+  return coerceText(text).toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -587,10 +588,9 @@ export class ResponseGenerator {
   }
 
   private shouldRetryStatefulResponder(
-    error: unknown,
+    _error: unknown,
     session: SessionInfo,
   ): boolean {
-    const message = error instanceof Error ? error.message : String(error);
     const hasExistingResponderThread = Boolean(session.responderMonitor?.getSessionId());
     if (!hasExistingResponderThread) return false;
     return true;
@@ -943,8 +943,8 @@ Confidence guide:
     return Array.from(new Map(signals.map((signal) => [signal.label, signal])).values());
   }
 
-  private shouldGuardAgainstFakeGreen(text: string): boolean {
-    const normalized = text.toLowerCase();
+  private shouldGuardAgainstFakeGreen(text: unknown): boolean {
+    const normalized = coerceText(text).toLowerCase();
     return /(done|complete|completed|substantively complete|parked|clean stop|nothing to send|green and complete|milestone complete)/.test(normalized);
   }
 
@@ -982,6 +982,16 @@ Confidence guide:
       .map((line) => line.trim())
       .filter((line) => line.length > 0)
       .slice(-120);
+  }
+
+  private isRoscoeLaneHandoffLine(line: string): boolean {
+    const normalized = line.trim().replace(/\s+/g, " ");
+    return normalized.startsWith("Sent to Guild:")
+      || normalized.startsWith("User: You are a Guild coding agent working on")
+      || normalized.startsWith("User: Roscoe restarted this lane while your previous turn was interrupted")
+      || normalized.startsWith("User: The Guild turn exited before reporting back")
+      || normalized.startsWith("User: Do not close or hold this lane.")
+      || normalized.startsWith("User: Continue.");
   }
 
   private getAcceptanceMatchTerms(item: { label: string; evidence: string[] }): string[] {
@@ -1249,7 +1259,9 @@ Confidence guide:
       return { triggered: false };
     }
 
-    const recentLines = this.getRecentTranscriptLines(conversationContext).slice(-24);
+    const recentLines = this.getRecentTranscriptLines(conversationContext)
+      .slice(-24)
+      .filter((line) => !this.isRoscoeLaneHandoffLine(line));
     const contradictionLine = [...recentLines]
       .reverse()
       .find((line) => DEPLOYED_CONTRADICTION_PATTERN.test(line));

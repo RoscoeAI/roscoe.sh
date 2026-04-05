@@ -277,22 +277,19 @@ describe("buildTurnCommand", () => {
     ]);
   });
 
-  it("builds Kimi turns with print mode, plan in safe mode, thinking toggles, and resume support", () => {
+  it("builds Kimi turns with CLI-default model usage, plan in safe mode, thinking toggles, and resume support", () => {
     const safeCommand = buildTurnCommand({
       name: "kimi",
       command: "kimi",
       args: [],
       protocol: "kimi",
       runtime: {
-        model: "kimi-for-coding",
         executionMode: "safe",
         reasoningEffort: "high",
       },
     }, "hello", "kimi-session-1");
 
     expect(safeCommand.args).toEqual([
-      "-m",
-      "kimi-for-coding",
       "--plan",
       "--thinking",
       "--print",
@@ -310,15 +307,12 @@ describe("buildTurnCommand", () => {
       args: ["--yolo"],
       protocol: "kimi",
       runtime: {
-        model: "kimi-for-coding",
         executionMode: "accelerated",
         reasoningEffort: "low",
       },
     }, "ship it");
 
     expect(lowEffortCommand.args).toEqual([
-      "-m",
-      "kimi-for-coding",
       "--no-thinking",
       "--print",
       "--output-format",
@@ -329,22 +323,19 @@ describe("buildTurnCommand", () => {
     ]);
   });
 
-  it("builds Qwen turns with sandboxed safe mode, partial stream-json output, and resume support", () => {
+  it("builds Qwen turns with CLI-default model usage, sandboxed safe mode, partial stream-json output, and resume support", () => {
     const safeCommand = buildTurnCommand({
       name: "qwen",
       command: "qwen",
       args: [],
       protocol: "qwen",
       runtime: {
-        model: "coder-model",
         executionMode: "safe",
         reasoningEffort: "high",
       },
     }, "hello", "qwen-session-1");
 
     expect(safeCommand.args).toEqual([
-      "-m",
-      "coder-model",
       "--sandbox",
       "--approval-mode",
       "yolo",
@@ -362,14 +353,11 @@ describe("buildTurnCommand", () => {
       args: ["--allowed-mcp-server-names", "serena"],
       protocol: "qwen",
       runtime: {
-        model: "coder-model",
         executionMode: "accelerated",
       },
     }, "ship it");
 
     expect(acceleratedCommand.args).toEqual([
-      "-m",
-      "coder-model",
       "--approval-mode",
       "yolo",
       "--output-format",
@@ -379,6 +367,34 @@ describe("buildTurnCommand", () => {
       "serena",
       "ship it",
     ]);
+  });
+
+  it("still passes explicit custom model ids for Qwen and Kimi when manually pinned", () => {
+    const qwenCommand = buildTurnCommand({
+      name: "qwen",
+      command: "qwen",
+      args: [],
+      protocol: "qwen",
+      runtime: {
+        model: "qwen-max",
+        executionMode: "accelerated",
+      },
+    }, "hello");
+
+    expect(qwenCommand.args.slice(0, 2)).toEqual(["-m", "qwen-max"]);
+
+    const kimiCommand = buildTurnCommand({
+      name: "kimi",
+      command: "kimi",
+      args: [],
+      protocol: "kimi",
+      runtime: {
+        model: "moonshot-v1",
+        executionMode: "accelerated",
+      },
+    }, "hello");
+
+    expect(kimiCommand.args.slice(0, 2)).toEqual(["-m", "moonshot-v1"]);
   });
 });
 

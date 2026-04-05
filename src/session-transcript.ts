@@ -1,5 +1,6 @@
 import { RestoreRecovery, SuggestionPhase, TranscriptEntry } from "./types.js";
 import { shouldSuppressRestoredRoscoeSuggestion } from "./roscoe-draft.js";
+import { coerceText } from "./text-coercion.js";
 
 function isConversationEntry(entry: TranscriptEntry): boolean {
   if (entry.kind === "local-suggestion") {
@@ -21,7 +22,7 @@ export function sortTranscriptEntries(entries: TranscriptEntry[]): TranscriptEnt
 }
 
 export function isPauseAcknowledgementText(text: string | null | undefined): boolean {
-  const normalized = (text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  const normalized = coerceText(text).replace(/\s+/g, " ").trim().toLowerCase();
   if (normalized === "paused" || normalized === "paused.") {
     return true;
   }
@@ -38,7 +39,7 @@ export function isPauseAcknowledgementText(text: string | null | undefined): boo
 }
 
 export function isParkedDecisionText(text: string | null | undefined): boolean {
-  const normalized = (text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  const normalized = coerceText(text).replace(/\s+/g, " ").trim().toLowerCase();
   if (!normalized) return false;
 
   return normalized.startsWith("parked")
@@ -50,7 +51,7 @@ export function isParkedDecisionText(text: string | null | undefined): boolean {
 }
 
 export function isParkedAcknowledgementText(text: string | null | undefined): boolean {
-  const normalized = (text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  const normalized = coerceText(text).replace(/\s+/g, " ").trim().toLowerCase();
   if (!normalized) return false;
 
   return isParkedDecisionText(normalized)
@@ -108,7 +109,7 @@ export function hasBoundedFutureWorkSignal(entries: TranscriptEntry[]): boolean 
     .slice(-24);
 
   return recentConversationEntries.some((entry) => {
-    const normalized = (entry.text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+    const normalized = coerceText(entry.text).replace(/\s+/g, " ").trim().toLowerCase();
     return /(remaining gap|remaining gaps|remaining work|next lane|next slice|next session|later lane|later thread|follow-up remains|open items|deployment thread|bounded follow-up|future thread)/.test(normalized);
   });
 }
@@ -163,8 +164,8 @@ export function inferAwaitingInput(
   return false;
 }
 
-function normalizeInlineText(value: string, maxLength = 220): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
+function normalizeInlineText(value: unknown, maxLength = 220): string {
+  const normalized = coerceText(value).replace(/\s+/g, " ").trim();
   if (!normalized) return "";
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(80, maxLength - 3)).trimEnd()}...`;

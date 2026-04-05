@@ -720,30 +720,32 @@ function normalizeTranscriptEntry(value: unknown): TranscriptEntry | null {
         state: typed.state,
       };
     case "local-sent":
-      if (
-        typeof typed.text !== "string" ||
-        (typed.delivery !== "approved" && typed.delivery !== "edited" && typed.delivery !== "manual" && typed.delivery !== "auto")
-      ) {
-        return null;
+      {
+        if (
+          typeof typed.text !== "string" ||
+          (typed.delivery !== "approved" && typed.delivery !== "edited" && typed.delivery !== "manual" && typed.delivery !== "auto")
+        ) {
+          return null;
+        }
+        const parsedDraft = parseRoscoeDraftPayload(typed.text);
+        return {
+          id: typed.id,
+          timestamp: typed.timestamp,
+          kind: "local-sent",
+          text: normalizeRoscoeDraftMessage(typed.text),
+          delivery: typed.delivery,
+          ...(typeof typed.confidence === "number"
+            ? { confidence: typed.confidence }
+            : typeof parsedDraft?.confidence === "number"
+              ? { confidence: parsedDraft.confidence }
+              : {}),
+          ...(typeof typed.reasoning === "string"
+            ? { reasoning: typed.reasoning }
+            : typeof parsedDraft?.reasoning === "string"
+              ? { reasoning: parsedDraft.reasoning }
+              : {}),
+        };
       }
-      const parsedDraft = parseRoscoeDraftPayload(typed.text);
-      return {
-        id: typed.id,
-        timestamp: typed.timestamp,
-        kind: "local-sent",
-        text: normalizeRoscoeDraftMessage(typed.text),
-        delivery: typed.delivery,
-        ...(typeof typed.confidence === "number"
-          ? { confidence: typed.confidence }
-          : typeof parsedDraft?.confidence === "number"
-            ? { confidence: parsedDraft.confidence }
-            : {}),
-        ...(typeof typed.reasoning === "string"
-          ? { reasoning: typed.reasoning }
-          : typeof parsedDraft?.reasoning === "string"
-            ? { reasoning: parsedDraft.reasoning }
-            : {}),
-      };
     case "tool-activity":
       if (typeof typed.provider !== "string" || typeof typed.toolName !== "string" || typeof typed.text !== "string") return null;
       return {

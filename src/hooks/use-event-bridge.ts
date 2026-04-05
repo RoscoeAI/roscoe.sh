@@ -27,6 +27,7 @@ import {
   isSilentNoOpReasoning,
   isSuppressedContinuationGuard,
 } from "../roscoe-draft.js";
+import { coerceText } from "../text-coercion.js";
 
 const RESUME_ACTIVITY_NAME = "resume";
 const RESUME_PENDING_DETAIL = "Resuming interrupted Guild turn...";
@@ -41,8 +42,8 @@ const MAX_THINKING_TEXT_CHARS = 24_000;
 const TRUNCATION_NOTICE = "\n[Roscoe truncated older buffered output to keep memory stable.]";
 const COMPACT_PROMPT_TEXT_CHARS = 180;
 
-function clipPromptText(text: string, maxChars = COMPACT_PROMPT_TEXT_CHARS): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
+function clipPromptText(text: unknown, maxChars = COMPACT_PROMPT_TEXT_CHARS): string {
+  const normalized = coerceText(text).replace(/\s+/g, " ").trim();
   if (normalized.length <= maxChars) return normalized;
   return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
@@ -553,7 +554,6 @@ export function useEventBridge(
       let turnText = "";
       let thinkingText = "";
       let lastToolActivity: string | null = null;
-      let lastToolDetail: string | null = null;
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
       let resumeWatchdog: ReturnType<typeof setTimeout> | null = null;
 
@@ -590,7 +590,6 @@ export function useEventBridge(
       const onText = (chunk: string) => {
         if (lastToolActivity === RESUME_ACTIVITY_NAME) {
           clearResumeWatchdog();
-          lastToolDetail = RESUME_RESPONDING_DETAIL;
           dispatch({
             type: "SET_TOOL_ACTIVITY",
             id,
@@ -662,7 +661,6 @@ export function useEventBridge(
       const applyRecoveryPlan = (seedSession: SessionState, recovery: NonNullable<ManagedSession["restoreRecovery"]>) => {
         if (recovery.mode === "resume-worker" && monitor.getSessionId()) {
           lastToolActivity = RESUME_ACTIVITY_NAME;
-          lastToolDetail = RESUME_PENDING_DETAIL;
           dispatch({
             type: "APPEND_TIMELINE_ENTRY",
             id,
@@ -734,7 +732,6 @@ export function useEventBridge(
         turnText = "";
         thinkingText = "";
         lastToolActivity = null;
-        lastToolDetail = null;
         managed.awaitingInput = true;
 
         dispatch({ type: "UPDATE_SESSION_STATUS", id, status: "waiting" });
@@ -855,7 +852,6 @@ export function useEventBridge(
         }
         if (toolName !== lastToolActivity) {
           lastToolActivity = toolName;
-          lastToolDetail = detail ?? null;
           dispatch({
             type: "APPEND_TIMELINE_ENTRY",
             id,
@@ -868,8 +864,6 @@ export function useEventBridge(
               text: detail ?? `Using ${toolName}`,
             },
           });
-        } else if (detail) {
-          lastToolDetail = detail;
         }
         dispatch({ type: "SET_TOOL_ACTIVITY", id, toolName, ...(detail !== undefined ? { detail } : {}) });
       };

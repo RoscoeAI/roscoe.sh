@@ -1,6 +1,7 @@
 import { ChildProcess, spawn } from "child_process";
 import { basename } from "path";
 import { createInterface } from "readline";
+import { coerceText } from "./text-coercion.js";
 
 export type LLMProtocol = "claude" | "codex" | "qwen" | "gemini" | "kimi";
 export type RuntimeExecutionMode = "safe" | "accelerated";
@@ -240,7 +241,7 @@ function buildQwenTurnCommand(
   const env = { ...(profile.env ?? {}), ...process.env };
   const runtime = profile.runtime;
   const args = [
-    ...(runtime?.model ? ["-m", runtime.model] : []),
+    ...(shouldPassExplicitModel(runtime?.model) ? ["-m", runtime!.model!] : []),
     ...(runtime?.executionMode !== "accelerated" ? ["--sandbox"] : []),
     "--approval-mode",
     "yolo",
@@ -267,7 +268,7 @@ function buildKimiTurnCommand(
   const env = { ...(profile.env ?? {}), ...process.env };
   const runtime = profile.runtime;
   const args = [
-    ...(runtime?.model ? ["-m", runtime.model] : []),
+    ...(shouldPassExplicitModel(runtime?.model) ? ["-m", runtime!.model!] : []),
     ...(runtime?.executionMode !== "accelerated" ? ["--plan"] : []),
     ...(runtime?.reasoningEffort === "low"
       ? ["--no-thinking"]
@@ -702,6 +703,10 @@ function summarizeKimiRuntimeFlags(runtime: RuntimeControlSettings | null | unde
   return parts;
 }
 
+export function shouldPassExplicitModel(model: string | undefined): model is string {
+  return typeof model === "string" && model.trim().length > 0 && model.trim().toLowerCase() !== "default";
+}
+
 function appendUniqueArg(args: string[], value: string): string[] {
   return args.includes(value) ? args : [...args, value];
 }
@@ -831,25 +836,22 @@ const QWEN_ADAPTER: ProviderAdapter = {
   id: "qwen",
   label: "Qwen",
   defaultProfileName: "qwen",
-  topModel: "coder-model",
-  knownModels: ["coder-model"],
+  topModel: "default",
+  knownModels: ["default"],
   reasoningOptions: ["low", "medium", "high"],
   defaultWorkerRuntime: {
     executionMode: "safe",
     tuningMode: "auto",
-    model: "coder-model",
     reasoningEffort: "high",
   },
   acceleratedWorkerRuntime: {
     executionMode: "accelerated",
     tuningMode: "auto",
-    model: "coder-model",
     reasoningEffort: "high",
   },
   defaultOnboardingRuntime: {
     executionMode: "safe",
     tuningMode: "auto",
-    model: "coder-model",
     reasoningEffort: "high",
   },
   defaultReasoningEffort: "high",
@@ -911,25 +913,22 @@ const KIMI_ADAPTER: ProviderAdapter = {
   id: "kimi",
   label: "Kimi",
   defaultProfileName: "kimi",
-  topModel: "kimi-for-coding",
-  knownModels: ["kimi-for-coding"],
+  topModel: "default",
+  knownModels: ["default"],
   reasoningOptions: ["low", "medium", "high"],
   defaultWorkerRuntime: {
     executionMode: "safe",
     tuningMode: "auto",
-    model: "kimi-for-coding",
     reasoningEffort: "high",
   },
   acceleratedWorkerRuntime: {
     executionMode: "accelerated",
     tuningMode: "auto",
-    model: "kimi-for-coding",
     reasoningEffort: "high",
   },
   defaultOnboardingRuntime: {
     executionMode: "safe",
     tuningMode: "auto",
-    model: "kimi-for-coding",
     reasoningEffort: "high",
   },
   defaultReasoningEffort: "high",
@@ -1009,7 +1008,7 @@ export function summarizeRuntime(profile: HeadlessProfile): string {
   const adapter = getProviderAdapter(protocol);
   const parts: string[] = [protocol];
 
-  if (runtime?.model) parts.push(runtime.model);
+  if (shouldPassExplicitModel(runtime?.model)) parts.push(runtime.model);
   if (runtime?.reasoningEffort) parts.push(runtime.reasoningEffort);
 
   parts.push(...adapter.summarizeRuntimeFlags(runtime));
@@ -1056,7 +1055,11 @@ export function parseOneShotStreamLine(
     return {};
   }
 
-  return getProviderAdapter(detectProtocol(profile)).parseOneShotLine(parsed);
+  const event = getProviderAdapter(detectProtocol(profile)).parseOneShotLine(parsed);
+  return {
+    ...(event.appendText !== undefined ? { appendText: coerceText(event.appendText) } : {}),
+    ...(event.replaceText !== undefined ? { replaceText: coerceText(event.replaceText) } : {}),
+  };
 }
 
 export function startOneShotRun(

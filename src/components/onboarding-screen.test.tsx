@@ -69,6 +69,9 @@ vi.mock("../provider-registry.js", () => ({
 
 vi.mock("../llm-runtime.js", () => ({
   detectProtocol: (profile: { name?: string }) => (profile.name?.includes("codex") ? "codex" : "claude"),
+  getKnownModels: (protocol: string) => protocol === "codex"
+    ? ["gpt-5.4", "gpt-5.4-mini"]
+    : ["claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4"],
   getProviderAdapter: (protocol: string) => ({
     label: protocol === "codex" ? "Codex" : "Claude",
     reasoningOptions: protocol === "codex" ? ["low", "medium", "high", "xhigh"] : ["low", "medium", "high", "max"],

@@ -213,6 +213,28 @@ describe("SessionMonitor", () => {
       }
       expect(mockSpawn).toHaveBeenCalledTimes(2);
     });
+
+    it("keeps the new readline alive if a replaced process closes late", async () => {
+      const firstProc = createMockProc();
+      const secondProc = createMockProc();
+      mockSpawn
+        .mockReturnValueOnce(firstProc)
+        .mockReturnValueOnce(secondProc);
+
+      monitor.startTurn("first");
+      const firstClose = firstProc.on.mock.calls.find(([event]) => event === "close")?.[1] as ((code: number) => void) | undefined;
+
+      monitor.startTurn("second");
+      firstClose?.(0);
+      secondProc.stdout.write(JSON.stringify({
+        type: "result",
+        session_id: "sess-second",
+        stop_reason: "end_turn",
+      }) + "\n");
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(monitor.getSessionId()).toBe("sess-second");
+    });
   });
 
   describe("NDJSON parsing", () => {

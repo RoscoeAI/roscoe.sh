@@ -259,15 +259,16 @@ export class SessionMonitor extends EventEmitter {
     };
   }
 
-  private closeReadline(): void {
-    if (this.rl) {
-      this.rl.close();
+  private closeReadline(rl: Interface | null = this.rl): void {
+    if (!rl) return;
+    rl.close();
+    if (this.rl === rl) {
       this.rl = null;
     }
   }
 
-  private cleanupProcess(proc: ChildProcess): void {
-    this.closeReadline();
+  private cleanupProcess(proc: ChildProcess, rl: Interface | null = this.rl): void {
+    this.closeReadline(rl);
     proc.removeAllListeners();
     proc.stdout?.removeAllListeners();
     proc.stderr?.removeAllListeners();
@@ -279,7 +280,7 @@ export class SessionMonitor extends EventEmitter {
   private replaceActiveProcess(): void {
     const current = this.proc;
     if (!current) return;
-    this.cleanupProcess(current);
+    this.cleanupProcess(current, this.rl);
     this.killProcessTree(current);
     this.activeClaudeTools.clear();
   }
@@ -345,7 +346,7 @@ export class SessionMonitor extends EventEmitter {
     // Capture proc reference in closure to avoid race with next spawnProcess call
     proc.on("close", (code) => {
       dbg("proc", `closed with code ${code}`);
-      this.cleanupProcess(proc);
+      this.cleanupProcess(proc, rl);
       this.emit("exit", code ?? 0);
     });
   }
@@ -360,7 +361,7 @@ export class SessionMonitor extends EventEmitter {
     try {
       parsed = JSON.parse(line) as Record<string, unknown>;
     } catch {
-      parsed = null;
+      // Ignore non-JSON lines and fall through to the stream parser.
     }
 
     if (parsed) {

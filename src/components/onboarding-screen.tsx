@@ -25,8 +25,6 @@ import { filterProfilesBySelectableProviders, getSelectableProviderIds } from ".
 import { detectProtocol, getProviderAdapter, LLMProtocol, RuntimeControlSettings } from "../llm-runtime.js";
 import {
   applyRuntimeSettings,
-  formatTokenEfficiencyLabel,
-  formatVerificationCadenceLabel,
   formatResponderApprovalLabel,
   formatWorkerGovernanceLabel,
   getAcceleratedWorkerRuntime,

@@ -82,7 +82,7 @@ describe("parseRoscoeDraftPayload", () => {
   });
 
   it("parses wrapped JSON that contains escaped quotes and braces inside strings", () => {
-    const text = 'prefix {"message":"Keep the \\\"preview\\\" adapter around {health}.","confidence":81,"reasoning":"quoted"} suffix';
+    const text = 'prefix {"message":"Keep the \\"preview\\" adapter around {health}.","confidence":81,"reasoning":"quoted"} suffix';
 
     expect(parseRoscoeDraftPayload(text)).toEqual({
       message: 'Keep the "preview" adapter around {health}.',

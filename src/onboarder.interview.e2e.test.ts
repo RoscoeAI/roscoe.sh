@@ -444,7 +444,7 @@ describe.sequential("onboarder interview e2e", () => {
           currentOutput += chunk;
         });
 
-        let turnDone = once(onboarder, "turn-complete");
+        const turnDone = once(onboarder, "turn-complete");
         onboarder.start();
         await turnDone;
 

@@ -28,7 +28,7 @@ export function StatusBar({
   sessionStatus,
   suggestionPhaseKind,
   previewMode = "off",
-  canInterruptActiveTurn = false,
+  canInterruptActiveTurn: _canInterruptActiveTurn = false,
   viewMode,
   followLive,
   runtimeEditorOpen = false,

@@ -1,5 +1,6 @@
 import { PreviewState, SessionState, TranscriptEntry } from "./types.js";
 import { isPauseAcknowledgementText } from "./session-transcript.js";
+import { coerceText } from "./text-coercion.js";
 
 const EMPTY_PREVIEW_STATE: PreviewState = {
   mode: "off",
@@ -24,7 +25,8 @@ function collectPreviewTexts(source: PreviewSource): string[] {
       entry.kind === "remote-turn" || entry.kind === "tool-activity" || entry.kind === "preview",
     )
     .slice(0, 8)
-    .map((entry) => entry.text);
+    .map((entry) => coerceText(entry.text))
+    .filter((text) => text.trim().length > 0);
 
   const outputText = source.outputLines.slice(-40).join("\n").trim();
   return [
@@ -63,7 +65,7 @@ function findPreviewCommand(source: PreviewSource): string | null {
 
 function summarizeLatestRemoteTurn(entries: TranscriptEntry[]): string | null {
   const latestRemote = [...entries].reverse().find((entry) => entry.kind === "remote-turn");
-  const text = latestRemote?.text.replace(/\s+/g, " ").trim() ?? "";
+  const text = coerceText(latestRemote?.text).replace(/\s+/g, " ").trim();
   if (!text) return null;
   return text.length > 140 ? `${text.slice(0, 137).trimEnd()}...` : text;
 }

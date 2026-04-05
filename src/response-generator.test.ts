@@ -1536,6 +1536,32 @@ describe("ResponseGenerator", () => {
       expect(corrected.confidence).toBe(94);
     });
 
+    it("ignores Roscoe-authored lane handoff prompts when checking for deployed contradictions", () => {
+      const corrected = (gen as any).applyDraftGuards(
+        {
+          text: "This lane is fully closed. Wait for the next slice.",
+          confidence: 96,
+          reasoning: "All CI jobs green and the hosted smoke passed.",
+        },
+        [
+          "Assistant: Final hosted result is green. The lane is fully closed.",
+          "User: You are a Guild coding agent working on the \"pulse\" project. Runtime tuning mode: auto. If the developer says it is still broken, can you read pod logs and dig deeper before closing the lane?",
+        ].join("\n"),
+        {
+          intentBrief: {
+            deploymentContract: {
+              summary: "pulse.example.com must stay truthful while fixes land.",
+              artifactType: "web app",
+            },
+          },
+        },
+      );
+
+      expect(corrected.text).toBe("This lane is fully closed. Wait for the next slice.");
+      expect(corrected.reasoning).toBe("All CI jobs green and the hosted smoke passed.");
+      expect(corrected.confidence).toBe(96);
+    });
+
     it("treats a non-resolving hosted proof target as a fake-green blocker for web deployments", async () => {
       const proc = createMockProc();
       mockSpawn.mockReturnValue(proc);

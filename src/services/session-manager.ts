@@ -28,7 +28,6 @@ import { detectProtocol, LLMProtocol, startOneShotRun, summarizeRuntime, Runtime
 import { NotificationService } from "../notification-service.js";
 import type { SmsInterventionRequest } from "../notification-service.js";
 import {
-  applyRuntimeSettings,
   getDefaultProfileName,
   getLockedProjectProvider,
   getResponderProvider,

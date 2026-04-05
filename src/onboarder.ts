@@ -92,7 +92,7 @@ function parseCheckpoint(raw: unknown): OnboardingCheckpoint | null {
   };
 }
 
-const BRIEF_SCHEMA_EXAMPLE = `{
+const _BRIEF_SCHEMA_EXAMPLE = `{
   "name": "project name",
   "directory": "/path/to/project",
   "goals": ["goal 1", "goal 2"],
@@ -563,6 +563,7 @@ export class Onboarder extends EventEmitter {
   private workspaceAssessment = inspectWorkspaceForOnboarding(process.cwd());
   private completed = false;
   private persistedBriefFingerprint: string | null = null;
+  private rejectedBriefFingerprint: string | null = null;
 
   constructor(
     projectDir: string,
@@ -617,6 +618,7 @@ export class Onboarder extends EventEmitter {
     }
     this.completed = false;
     this.persistedBriefFingerprint = null;
+    this.rejectedBriefFingerprint = null;
 
     this.profile = applyProjectEnvToProfile(this.profile, dir);
     this.session = new SessionMonitor(
@@ -740,6 +742,9 @@ Ask the next highest-value question, or complete the brief if everything is read
     if (this.completed || this.persistedBriefFingerprint === fingerprint) {
       return "completed";
     }
+    if (this.rejectedBriefFingerprint === fingerprint) {
+      return "none";
+    }
 
     try {
       const parsed = JSON.parse(fingerprint) as Partial<ProjectContext>;
@@ -757,6 +762,7 @@ Ask the next highest-value question, or complete the brief if everything is read
           return "none";
         }
         dbg("onboard", `brief rejected; missing themes=${readiness.missingThemes.join(",")} missingFields=${readiness.missingFields.join(",")}`);
+        this.rejectedBriefFingerprint = fingerprint;
         this.requestMoreInterview(readiness);
         return "continued";
       }
@@ -782,6 +788,7 @@ Ask the next highest-value question, or complete the brief if everything is read
       registerProject(brief.name, brief.directory);
       this.completed = true;
       this.persistedBriefFingerprint = fingerprint;
+      this.rejectedBriefFingerprint = null;
       this.clearCheckpoint();
       this.emit("onboarding-complete", brief);
       return "completed";

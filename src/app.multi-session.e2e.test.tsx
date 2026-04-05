@@ -351,7 +351,7 @@ function buildScenario(projects: Record<string, ProjectSpec>): MockCall[] {
       "- The error panel still overreacts to schema resolver warnings.",
     ], 55),
     responderResumeErrorCall(relay, "The error panel still overreacts to schema resolver warnings.", "Mock schema resolver crashed"),
-    responderResumeSuggestionCall(relay, "The error panel still overreacts to schema resolver warnings.", "Stabilize timeout controls, calm the warning panel, and verify auth-aware schema examples.", 78, "the remaining work is corrective"),
+    responderSeedSuggestionCall(relay, "The error panel still overreacts to schema resolver warnings.", "Stabilize timeout controls, calm the warning panel, and verify auth-aware schema examples.", 78, "the remaining work is corrective"),
     followUpWorkerCall(relay, "Stabilize timeout controls, calm the warning panel, and verify auth-aware schema examples.", [
       "Relay Playground now calms schema warnings and renders auth-aware examples.",
       "- Secrets masking in the environment editor is still missing.",

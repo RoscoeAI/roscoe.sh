@@ -40,7 +40,7 @@ describe("home-screen helpers", () => {
       status: "delivered",
     })).toEqual({
       text: "Hosted relay test SMS delivered to 6122030386. Reply C to verify the round trip back into this CLI.",
-      color: "green",
+      color: "yellow",
     });
 
     expect(describeHostedSmsResult("6122030386", {

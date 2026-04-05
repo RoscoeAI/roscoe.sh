@@ -150,11 +150,11 @@ describe.sequential("Ink app e2e", () => {
       const calls = readInvocationLog(env.logPath);
       expect(calls.some((call) => call.resumeId === `${provider}-tui-1`)).toBe(true);
       const workerCall = calls.find((call) => call.provider === provider && call.resumeId === null)!;
-      expect(workerCall.args).toEqual(
+        expect(workerCall.args).toEqual(
         expect.arrayContaining(
           provider === "claude"
             ? ["--model", "claude-opus-4-6", "--effort", "max"]
-            : ["-m", "gpt-5.4", "-c", 'model_reasoning_effort="xhigh"', "-s", "workspace-write", "-a", "never"],
+            : ["-m", "gpt-5.4", "-c", 'model_reasoning_effort="xhigh"', "--dangerously-bypass-approvals-and-sandbox", "exec", "--json", "--skip-git-repo-check"],
         ),
       );
     } finally {

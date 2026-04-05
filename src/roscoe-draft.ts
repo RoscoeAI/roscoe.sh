@@ -1,3 +1,5 @@
+import { coerceText } from "./text-coercion.js";
+
 export type RoscoeDecision = "message" | "restart-worker" | "noop" | "host-actions-only" | "needs-review";
 
 export interface RoscoeDraftPayload {
@@ -25,15 +27,16 @@ function isRoscoeDecision(value: unknown): value is RoscoeDecision {
     || value === "needs-review";
 }
 
-function stripJsonFence(text: string): string {
-  return text
+function stripJsonFence(text: unknown): string {
+  const normalizedText = coerceText(text);
+  return normalizedText
     .trim()
     .replace(/^```json?\n?/, "")
     .replace(/\n?```$/, "")
     .trim();
 }
 
-function extractCandidateJson(text: string): string | null {
+function extractCandidateJson(text: unknown): string | null {
   const stripped = stripJsonFence(text);
   if (stripped.startsWith("{") && stripped.endsWith("}")) {
     try {
@@ -86,7 +89,7 @@ function extractCandidateJson(text: string): string | null {
   return null;
 }
 
-export function looksLikeRoscoeStructuredDraft(text: string): boolean {
+export function looksLikeRoscoeStructuredDraft(text: unknown): boolean {
   const normalized = stripJsonFence(text).trim();
   if (!normalized) return false;
 
@@ -107,12 +110,12 @@ export function looksLikeRoscoeStructuredDraft(text: string): boolean {
   return false;
 }
 
-export function inferMalformedStructuredDecision(text: string): RoscoeDecision {
-  const match = text.match(/"decision"\s*:\s*"([^"]+)"/i);
+export function inferMalformedStructuredDecision(text: unknown): RoscoeDecision {
+  const match = coerceText(text).match(/"decision"\s*:\s*"([^"]+)"/i);
   return match?.[1]?.toLowerCase() === "noop" ? "noop" : "needs-review";
 }
 
-export function parseRoscoeDraftPayload(text: string): RoscoeDraftPayload | null {
+export function parseRoscoeDraftPayload(text: unknown): RoscoeDraftPayload | null {
   const candidate = extractCandidateJson(text);
   if (!candidate) return null;
 
@@ -209,20 +212,20 @@ export function shouldSuppressRestoredRoscoeSuggestion(
   return false;
 }
 
-export function normalizeRoscoeDraftMessage(text: string): string {
+export function normalizeRoscoeDraftMessage(text: unknown): string {
   const parsed = parseRoscoeDraftPayload(text);
-  return typeof parsed?.message === "string" ? parsed.message : text;
+  return typeof parsed?.message === "string" ? parsed.message : coerceText(text);
 }
 
-export function formatRoscoeDraftDisplayText(text: string): string {
+export function formatRoscoeDraftDisplayText(text: unknown): string {
   const normalized = normalizeRoscoeDraftMessage(text).trim();
   return normalized || "Roscoe recommends holding the Guild reply for now.";
 }
 
-export function normalizeLegacySidecarErrorText(text: string): string {
-  const normalized = text.trim();
+export function normalizeLegacySidecarErrorText(text: unknown): string {
+  const normalized = coerceText(text).trim();
   if (normalized === "Sidecar timed out after 30s") {
     return "Roscoe sidecar timed out after 30s in an earlier run before the timeout was raised.";
   }
-  return text;
+  return normalized;
 }

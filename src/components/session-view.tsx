@@ -21,10 +21,7 @@ import {
   loadProfile,
   loadProjectContext,
   normalizeProjectContext,
-  ResponderApprovalMode,
   saveProjectContext,
-  VerificationCadence,
-  WorkerGovernanceMode,
 } from "../config.js";
 import { getSelectableProviderIds } from "../provider-registry.js";
 import {
@@ -192,12 +189,6 @@ export function SessionView({ startSpecs, startRuntimeOverrides }: SessionViewPr
     ? loadProjectContext(activeSession.managed.projectDir)
     : null;
   const notificationStatus = service.notifications.getStatus();
-  const canTextQuestion = Boolean(
-    activeSession
-    && activeSession.managed.awaitingInput
-    && notificationStatus.phoneNumber
-    && notificationStatus.providerReady,
-  );
   const railWidth = columns >= 180 ? 54 : columns >= 150 ? 48 : columns >= 125 ? 42 : columns >= 100 ? 36 : 30;
   const pageDelta = Math.max(6, Math.floor(rows * 0.35));
   const activePreview = getPreviewState(activeSession?.preview);
