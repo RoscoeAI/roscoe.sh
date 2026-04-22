@@ -233,12 +233,17 @@ export interface KimiProviderSettings {
   enabled: boolean;
 }
 
+export interface OpenRouterProviderSettings {
+  enabled: boolean;
+}
+
 export interface RoscoeProviderSettings {
   claude: ClaudeProviderSettings;
   codex: CodexProviderSettings;
   qwen: QwenProviderSettings;
   gemini: GeminiProviderSettings;
   kimi: KimiProviderSettings;
+  openrouter: OpenRouterProviderSettings;
 }
 
 export interface RoscoeBehaviorSettings {
@@ -944,6 +949,18 @@ function normalizeKimiProviderSettings(value: unknown): KimiProviderSettings {
   };
 }
 
+function normalizeOpenRouterProviderSettings(value: unknown): OpenRouterProviderSettings {
+  const typed = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  // Default-off: OpenRouter lanes need `OPENROUTER_API_KEY` in the shell
+  // env and the `opencode` CLI on $PATH. Leave off until the operator
+  // opts in.
+  return {
+    enabled: typed.enabled === true,
+  };
+}
+
 function normalizeProviderSettings(value: unknown): RoscoeProviderSettings {
   const typed = value && typeof value === "object"
     ? value as Record<string, unknown>
@@ -954,6 +971,7 @@ function normalizeProviderSettings(value: unknown): RoscoeProviderSettings {
     qwen: normalizeQwenProviderSettings(typed.qwen),
     gemini: normalizeGeminiProviderSettings(typed.gemini),
     kimi: normalizeKimiProviderSettings(typed.kimi),
+    openrouter: normalizeOpenRouterProviderSettings(typed.openrouter),
   };
 }
 

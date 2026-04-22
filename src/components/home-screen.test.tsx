@@ -466,6 +466,9 @@ describe("HomeScreen", () => {
         gemini: {
           enabled: true,
         },
+        openrouter: {
+          enabled: false,
+        },
       },
       behavior: {
         autoHealMetadata: true,

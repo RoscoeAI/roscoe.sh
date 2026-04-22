@@ -375,6 +375,7 @@ describe("provider registry", () => {
         qwen: { enabled: false },
         gemini: { enabled: false },
         kimi: { enabled: false },
+        openrouter: { enabled: false },
       },
     } as any;
 
@@ -408,6 +409,7 @@ describe("provider registry", () => {
         qwen: { enabled: false },
         gemini: { enabled: false },
         kimi: { enabled: false },
+        openrouter: { enabled: false },
       },
     } as any;
 
@@ -447,6 +449,7 @@ describe("provider registry", () => {
         qwen: { enabled: false },
         gemini: { enabled: false },
         kimi: { enabled: false },
+        openrouter: { enabled: false },
       },
     } as any;
 

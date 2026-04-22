@@ -1,0 +1,6 @@
+{
+  "name": "openrouter",
+  "command": "opencode",
+  "args": [],
+  "protocol": "openrouter"
+}

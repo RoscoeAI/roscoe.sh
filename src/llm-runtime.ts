@@ -2,8 +2,13 @@ import { ChildProcess, spawn } from "child_process";
 import { basename } from "path";
 import { createInterface } from "readline";
 import { coerceText } from "./text-coercion.js";
+import {
+  OPENCODE_OPENROUTER_FREE_ROUTER_MODEL_ID,
+  OPENROUTER_FREE_ROUTER_MODEL_ID,
+  upsertRoscoeOpenCodeOpenRouterModels,
+} from "./opencode-config.js";
 
-export type LLMProtocol = "claude" | "codex" | "qwen" | "gemini" | "kimi";
+export type LLMProtocol = "claude" | "codex" | "qwen" | "gemini" | "kimi" | "openrouter";
 export type RuntimeExecutionMode = "safe" | "accelerated";
 export type RuntimeTuningMode = "manual" | "auto";
 
@@ -744,6 +749,165 @@ function applyCodexManagedArgs(args: string[], settings: unknown): string[] {
   return typed.webSearch === true ? appendUniqueArg(args, "--search") : [...args];
 }
 
+function normalizeReasoningEffortValue(reasoningEffort: string | undefined): string | undefined {
+  if (!reasoningEffort) {
+    return reasoningEffort;
+  }
+  switch (reasoningEffort.trim().toLowerCase()) {
+    case "max":
+      return "xhigh";
+    case "minimal":
+    case "none":
+      return "low";
+    default:
+      return reasoningEffort;
+  }
+}
+
+function mapOpenCodeReasoningVariant(reasoningEffort: string | undefined): string | null {
+  const normalized = normalizeReasoningEffortValue(reasoningEffort);
+  if (!normalized) return null;
+  switch (normalized) {
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+      return normalized;
+    default:
+      return normalized;
+  }
+}
+
+function buildOpenRouterTurnCommand(
+  profile: HeadlessProfile,
+  prompt: string,
+  sessionId?: string | null,
+): SpawnSpec {
+  const env = { ...(profile.env ?? {}), ...process.env };
+  const runtime = profile.runtime;
+  if (runtime?.model) {
+    upsertRoscoeOpenCodeOpenRouterModels([runtime.model]);
+  }
+  const variant = mapOpenCodeReasoningVariant(runtime?.reasoningEffort);
+  const launchModel = runtime?.model === OPENROUTER_FREE_ROUTER_MODEL_ID
+    ? OPENCODE_OPENROUTER_FREE_ROUTER_MODEL_ID
+    : runtime?.model;
+  const args = [
+    ...profile.args,
+    "run",
+    "--format",
+    "json",
+    ...(launchModel ? ["-m", launchModel] : []),
+    ...(variant ? ["--variant", variant] : []),
+    ...(sessionId ? ["--session", sessionId] : []),
+    prompt,
+  ];
+
+  return {
+    command: profile.command,
+    args,
+    env,
+  };
+}
+
+function normalizeOpenCodeUsage(tokens: unknown): RuntimeUsageSnapshot | null {
+  const typed = tokens && typeof tokens === "object" && !Array.isArray(tokens)
+    ? tokens as Record<string, unknown>
+    : null;
+  if (!typed) return null;
+  const cache = typed.cache && typeof typed.cache === "object" && !Array.isArray(typed.cache)
+    ? typed.cache as Record<string, unknown>
+    : null;
+  const normalize = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+  return {
+    inputTokens: normalize(typed.input),
+    outputTokens: normalize(typed.output),
+    cachedInputTokens: normalize(cache?.read),
+    cacheCreationInputTokens: normalize(cache?.write),
+  };
+}
+
+function parseOpenRouterSessionLine(
+  parsed: Record<string, unknown>,
+  handlers: SessionLineHandlers,
+): void {
+  if (typeof parsed.sessionID === "string") {
+    handlers.onSessionId?.(parsed.sessionID);
+  }
+
+  const eventType = typeof parsed.type === "string"
+    ? parsed.type.replace(/-/g, "_")
+    : null;
+
+  if (eventType === "text") {
+    const part = parsed.part && typeof parsed.part === "object" && !Array.isArray(parsed.part)
+      ? parsed.part as Record<string, unknown>
+      : null;
+    if (typeof part?.text === "string") {
+      handlers.onText?.(part.text);
+    }
+    return;
+  }
+
+  if (eventType === "tool_use" || eventType === "tool") {
+    const part = parsed.part && typeof parsed.part === "object" && !Array.isArray(parsed.part)
+      ? parsed.part as Record<string, unknown>
+      : null;
+    if (typeof part?.tool === "string") {
+      handlers.onToolActivity?.(part.tool);
+    }
+    return;
+  }
+
+  if (eventType === "step_finish") {
+    const part = parsed.part && typeof parsed.part === "object" && !Array.isArray(parsed.part)
+      ? parsed.part as Record<string, unknown>
+      : null;
+    const usage = normalizeOpenCodeUsage(part?.tokens);
+    if (usage) {
+      handlers.onUsage?.(usage);
+    }
+    const reason = typeof part?.reason === "string"
+      ? part.reason.replace(/_/g, "-")
+      : null;
+    if (reason && reason !== "tool-calls") {
+      handlers.onTurnComplete?.();
+    }
+  }
+}
+
+function parseOpenRouterOneShotLine(parsed: Record<string, unknown>): OneShotLineResult {
+  if (parsed.type === "text") {
+    const part = parsed.part && typeof parsed.part === "object" && !Array.isArray(parsed.part)
+      ? parsed.part as Record<string, unknown>
+      : null;
+    if (typeof part?.text === "string") {
+      return { appendText: part.text };
+    }
+    return {};
+  }
+
+  if (parsed.type === "error") {
+    const error = parsed.error && typeof parsed.error === "object" && !Array.isArray(parsed.error)
+      ? parsed.error as Record<string, unknown>
+      : null;
+    const data = error?.data && typeof error.data === "object" && !Array.isArray(error.data)
+      ? error.data as Record<string, unknown>
+      : null;
+    const message = typeof data?.message === "string"
+      ? data.message
+      : typeof error?.message === "string"
+        ? error.message
+        : null;
+    if (message) {
+      return { replaceText: message };
+    }
+  }
+
+  return {};
+}
+
 const CLAUDE_ADAPTER: ProviderAdapter = {
   id: "claude",
   label: "Claude",
@@ -946,16 +1110,65 @@ const KIMI_ADAPTER: ProviderAdapter = {
   applyManagedArgs: (args) => [...args],
 };
 
+const OPENROUTER_ADAPTER: ProviderAdapter = {
+  id: "openrouter",
+  label: "OpenRouter",
+  defaultProfileName: "openrouter",
+  // Default to the free Qwen-3-next router model; users can override at the
+  // lane level through the runtime editor. `topModel` + `knownModels` are
+  // advisory — OpenRouter supports any model its catalog knows about.
+  topModel: "qwen/qwen3-next-80b-a3b-instruct:free",
+  knownModels: [
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    OPENROUTER_FREE_ROUTER_MODEL_ID,
+  ],
+  reasoningOptions: ["low", "medium", "high", "xhigh"],
+  defaultWorkerRuntime: {
+    executionMode: "accelerated",
+    tuningMode: "auto",
+    reasoningEffort: "high",
+  },
+  acceleratedWorkerRuntime: {
+    executionMode: "accelerated",
+    tuningMode: "auto",
+    reasoningEffort: "high",
+  },
+  defaultOnboardingRuntime: {
+    executionMode: "accelerated",
+    tuningMode: "auto",
+    reasoningEffort: "high",
+  },
+  defaultReasoningEffort: "high",
+  onboardingReasoningEffort: "high",
+  frontendReasoningEffort: "medium",
+  efficientFrontendReasoningEffort: "low",
+  deepReasoningEffort: "xhigh",
+  efficientDeepReasoningEffort: "high",
+  generalReasoningEffort: "high",
+  efficientGeneralReasoningEffort: "medium",
+  buildTurnCommand: buildOpenRouterTurnCommand,
+  parseSessionLine: parseOpenRouterSessionLine,
+  parseOneShotLine: parseOpenRouterOneShotLine,
+  summarizeRuntimeFlags: () => ["opencode"],
+  applyManagedArgs: (args) => [...args],
+};
+
 const PROVIDER_ADAPTERS: Record<LLMProtocol, ProviderAdapter> = {
   claude: CLAUDE_ADAPTER,
   codex: CODEX_ADAPTER,
   qwen: QWEN_ADAPTER,
   kimi: KIMI_ADAPTER,
   gemini: GEMINI_ADAPTER,
+  openrouter: OPENROUTER_ADAPTER,
 };
 
 export function isLLMProtocol(value: unknown): value is LLMProtocol {
-  return value === "claude" || value === "codex" || value === "qwen" || value === "gemini" || value === "kimi";
+  return value === "claude"
+    || value === "codex"
+    || value === "qwen"
+    || value === "gemini"
+    || value === "kimi"
+    || value === "openrouter";
 }
 
 export function getProviderAdapter(protocol: LLMProtocol): ProviderAdapter {
@@ -974,6 +1187,7 @@ export function detectProtocol(profile: Pick<HeadlessProfile, "command" | "name"
   if (profile.protocol && isLLMProtocol(profile.protocol)) return profile.protocol;
 
   const hint = `${basename(profile.command)} ${profile.name}`.toLowerCase();
+  if (hint.includes("openrouter") || hint.includes("opencode")) return "openrouter";
   if (hint.includes("codex")) return "codex";
   if (hint.includes("qwen")) return "qwen";
   if (hint.includes("kimi")) return "kimi";

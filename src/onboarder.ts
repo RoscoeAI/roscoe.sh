@@ -17,7 +17,7 @@ import {
 } from "./config.js";
 import { EventEmitter } from "events";
 import { dbg, enableDebug } from "./debug-log.js";
-import { detectProtocol, HeadlessProfile, summarizeRuntime } from "./llm-runtime.js";
+import { detectProtocol, HeadlessProfile, LLMProtocol, summarizeRuntime } from "./llm-runtime.js";
 import { applyRuntimeSettings, getDefaultOnboardingRuntime } from "./runtime-defaults.js";
 import { inspectWorkspaceForOnboarding } from "./workspace-intake.js";
 import {
@@ -34,7 +34,7 @@ const ONBOARDING_CHECKPOINT_FILE = "onboarding-checkpoint.json";
 interface OnboardingCheckpoint {
   version: number;
   mode: OnboardingMode;
-  protocol: "claude" | "codex" | "qwen" | "gemini" | "kimi";
+  protocol: LLMProtocol;
   profileName: string;
   projectDir: string;
   createdAt: string;

@@ -2218,6 +2218,9 @@ describe("config", () => {
           kimi: {
             enabled: false,
           },
+          openrouter: {
+            enabled: false,
+          },
         },
         behavior: {
           autoHealMetadata: true,
@@ -2257,6 +2260,7 @@ describe("config", () => {
           qwen: { enabled: true },
           gemini: { enabled: true },
           kimi: { enabled: true },
+          openrouter: { enabled: false },
         },
         behavior: {
           autoHealMetadata: true,
