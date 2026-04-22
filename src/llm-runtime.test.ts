@@ -413,7 +413,7 @@ describe("provider adapters", () => {
 
   it("defaults unknown commands to claude and exposes provider summaries", () => {
     expect(detectProtocol({ name: "mystery", command: "llm" })).toBe("claude");
-    expect(listProviderAdapters().map((adapter) => adapter.id)).toEqual(["claude", "codex", "qwen", "kimi", "gemini"]);
+    expect(listProviderAdapters().map((adapter) => adapter.id)).toEqual(["claude", "codex", "qwen", "kimi", "gemini", "openrouter"]);
 
     expect(summarizeRuntime({
       name: "codex",

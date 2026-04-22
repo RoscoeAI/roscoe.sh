@@ -2141,6 +2141,9 @@ describe("config", () => {
           kimi: {
             enabled: true,
           },
+          openrouter: {
+            enabled: false,
+          },
         },
         behavior: {
           autoHealMetadata: true,
@@ -2366,6 +2369,9 @@ describe("config", () => {
           },
           kimi: {
             enabled: true,
+          },
+          openrouter: {
+            enabled: false,
           },
         },
         behavior: {
