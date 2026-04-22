@@ -228,6 +228,12 @@ export class SessionMonitor extends EventEmitter {
   private cwd: string;
   private profile: HeadlessProfile;
   private activeClaudeTools = new Map<number, ClaudeToolBlock>();
+  // Optional async hook used by openrouter lanes to prepare a warm
+  // `opencode serve` URL before each turn spawns. When set, `startTurn`
+  // awaits the resolver and augments the profile with `attachUrl` before
+  // building the spawn command. For every other provider the resolver is
+  // absent and `startTurn` stays synchronous.
+  private launchProfileResolver: ((profile: HeadlessProfile, cwd: string) => Promise<HeadlessProfile>) | null = null;
 
   constructor(
     public readonly id: string,
@@ -238,6 +244,12 @@ export class SessionMonitor extends EventEmitter {
     this.profile = profile;
     this.cwd = cwd || process.cwd();
     this.resolvedCommand = this.resolveCommand(profile.command);
+  }
+
+  setLaunchProfileResolver(
+    resolver: ((profile: HeadlessProfile, cwd: string) => Promise<HeadlessProfile>) | null,
+  ): void {
+    this.launchProfileResolver = resolver;
   }
 
   private resolveCommand(command: string): string {
@@ -303,6 +315,36 @@ export class SessionMonitor extends EventEmitter {
    */
   startTurn(prompt: string): void {
     this.lastPrompt = prompt;
+    if (this.launchProfileResolver) {
+      const resolver = this.launchProfileResolver;
+      void resolver(this.profile, this.cwd).then((resolvedProfile) => {
+        this.lastCommandPreview = buildCommandPreview(
+          { ...resolvedProfile, command: this.resolvedCommand },
+          this.sessionId,
+        );
+        const spec = buildTurnCommand(
+          { ...resolvedProfile, command: this.resolvedCommand },
+          prompt,
+          this.sessionId,
+        );
+        this.spawnProcess(spec.args, spec.env);
+      }).catch((err) => {
+        dbg("session-monitor:launch-resolver-error", err instanceof Error ? err.message : String(err));
+        // Fall back to the raw profile — better to try a bare spawn than
+        // to leave the lane frozen forever on a resolver crash.
+        this.lastCommandPreview = buildCommandPreview(
+          { ...this.profile, command: this.resolvedCommand },
+          this.sessionId,
+        );
+        const spec = buildTurnCommand(
+          { ...this.profile, command: this.resolvedCommand },
+          prompt,
+          this.sessionId,
+        );
+        this.spawnProcess(spec.args, spec.env);
+      });
+      return;
+    }
     this.lastCommandPreview = buildCommandPreview(
       { ...this.profile, command: this.resolvedCommand },
       this.sessionId,

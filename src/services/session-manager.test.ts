@@ -22,6 +22,11 @@ class MockSessionMonitor extends EventEmitter {
   });
   kill = vi.fn();
   setProfile = vi.fn();
+  // Stub for the openrouter warm-server hook. Session-manager installs this
+  // resolver on every SessionMonitor to prepare `attachUrl` when the lane
+  // happens to be OpenRouter; the mock swallows it since our tests never
+  // spawn real processes.
+  setLaunchProfileResolver = vi.fn();
   id: string;
   constructor(id: string) {
     super();
@@ -54,6 +59,11 @@ vi.mock("../session-monitor.js", () => ({
 }));
 vi.mock("child_process", () => ({
   execFile: (...args: unknown[]) => mockExecFile(...args),
+  // OpenCodeServerManager (constructed eagerly inside SessionManagerService)
+  // imports `spawn`. The manager stores it but doesn't use it unless a lane
+  // calls `prepareProfile` — which our tests never trigger. A no-op stub is
+  // enough to satisfy the module-init binding.
+  spawn: vi.fn(),
 }));
 vi.mock("../llm-runtime.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../llm-runtime.js")>();

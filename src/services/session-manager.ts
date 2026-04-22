@@ -11,6 +11,7 @@ import {
   saveLaneSession,
 } from "../config.js";
 import { SessionMonitor } from "../session-monitor.js";
+import { OpenCodeServerManager } from "../opencode-server.js";
 import { ConversationTracker } from "../conversation-tracker.js";
 import {
   ResponseGenerator,
@@ -120,11 +121,13 @@ export class SessionManagerService {
   browserAgent: BrowserAgent | null = null;
   orchestrator: Orchestrator | null = null;
   notifications: NotificationService;
+  openCodeServers: OpenCodeServerManager;
 
-  constructor(threshold = 70) {
+  constructor(threshold = 70, openCodeServers = new OpenCodeServerManager()) {
     this.generator = new ResponseGenerator(threshold);
     this.injector = new InputInjector();
     this.notifications = new NotificationService();
+    this.openCodeServers = openCodeServers;
   }
 
   startSession(opts: SessionStartOpts): SessionStartResult {
@@ -161,10 +164,19 @@ export class SessionManagerService {
       profile,
       canonicalWorktreePath,
     );
+    // OpenRouter lanes need a warm `opencode serve` loopback. Every other
+    // protocol keeps its bare-spawn path — the resolver is absent and
+    // `startTurn` stays synchronous for them.
+    monitor.setLaunchProfileResolver(
+      (nextProfile, cwd) => this.openCodeServers.prepareProfile(nextProfile, cwd),
+    );
     const responderMonitor = new SessionMonitor(
       `${id}-responder`,
       responderProfile,
       canonicalWorktreePath,
+    );
+    responderMonitor.setLaunchProfileResolver(
+      (nextProfile, cwd) => this.openCodeServers.prepareProfile(nextProfile, cwd),
     );
     const tracker = new ConversationTracker();
     const behaviorSettings = loadRoscoeSettings().behavior;

@@ -45,6 +45,11 @@ export interface HeadlessProfile {
   protocol?: LLMProtocol;
   runtime?: RuntimeControlSettings;
   env?: NodeJS.ProcessEnv;
+  // Set by OpenCodeServerManager.prepareProfile for openrouter lanes — the
+  // URL of the warm `opencode serve` loopback server the worker should
+  // attach to rather than spinning up its own. Absent for every other
+  // provider.
+  attachUrl?: string;
 }
 
 export interface SpawnSpec {
@@ -797,6 +802,7 @@ function buildOpenRouterTurnCommand(
     "run",
     "--format",
     "json",
+    ...(profile.attachUrl ? ["--attach", profile.attachUrl] : []),
     ...(launchModel ? ["-m", launchModel] : []),
     ...(variant ? ["--variant", variant] : []),
     ...(sessionId ? ["--session", sessionId] : []),
