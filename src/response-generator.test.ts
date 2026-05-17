@@ -166,6 +166,37 @@ class RetryableResponderMonitor extends EventEmitter {
   kill = vi.fn();
 }
 
+class FailingReseedResponderMonitor extends EventEmitter {
+  private sessionId: string | null;
+
+  constructor(sessionId: string | null = "stale-responder-session") {
+    super();
+    this.sessionId = sessionId;
+  }
+
+  startTurn = vi.fn((prompt: string) => {
+    this.sessionId = "failed-fresh-responder-session";
+    setImmediate(() => {
+      this.emit("exit", 1);
+    });
+    return prompt;
+  });
+
+  sendFollowUp = vi.fn((prompt: string) => {
+    setImmediate(() => {
+      this.emit("exit", 1);
+    });
+    return prompt;
+  });
+
+  getSessionId = vi.fn(() => this.sessionId);
+  restoreSessionId = vi.fn((sessionId: string | null) => {
+    this.sessionId = sessionId;
+  });
+  setProfile = vi.fn();
+  kill = vi.fn();
+}
+
 class TimeoutThenReseedResponderMonitor extends EventEmitter {
   private sessionId: string | null;
 
@@ -2131,6 +2162,37 @@ describe("ResponseGenerator", () => {
       expect(responderMonitor.startTurn).toHaveBeenCalledTimes(1);
       expect(String(responderMonitor.startTurn.mock.calls[0][0])).toContain("persistent hidden Roscoe responder thread");
       expect(traces.at(-1)?.rationale).toContain("cleared a failed hidden responder thread and reseeded it");
+    });
+
+    it("clears the hidden responder thread when reseeding also exits nonzero", async () => {
+      const responderMonitor = new FailingReseedResponderMonitor();
+      const onResponderStateReset = vi.fn();
+
+      await expect(gen.generateSuggestion(
+        "ctx",
+        "claude",
+        {
+          profile: { name: "claude", command: "claude", args: [], protocol: "claude" },
+          profileName: "claude",
+          projectName: "demo",
+          projectDir: "/tmp/demo",
+          worktreePath: "/tmp/demo",
+          worktreeName: "main",
+          responderMonitor: responderMonitor as any,
+          responderHistory: [
+            { role: "assistant", content: "old guild turn", timestamp: 1 },
+            { role: "user", content: "keep moving", timestamp: 2 },
+          ],
+          responderHistoryCursor: 1,
+          onResponderStateReset,
+        },
+      )).rejects.toThrow("Sidecar process failed (exit code 1)");
+
+      expect(responderMonitor.sendFollowUp).toHaveBeenCalledTimes(1);
+      expect(responderMonitor.startTurn).toHaveBeenCalledTimes(1);
+      expect(responderMonitor.restoreSessionId).toHaveBeenCalledWith(null);
+      expect(responderMonitor.getSessionId()).toBeNull();
+      expect(onResponderStateReset).toHaveBeenCalledTimes(2);
     });
 
     it("reseeds the hidden responder thread when it emits malformed structured draft output", async () => {

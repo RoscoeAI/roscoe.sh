@@ -1668,7 +1668,11 @@ ${this.getStructuredResponseInstructions(this.browser !== null, projectCtx !== n
         ? await this.generateSuggestionStateful(prompt, sidecarProfile, session!, onPartial, onUsage)
         : await this.generateSuggestionStateless(prompt, sidecarProfile, onPartial);
     } catch (error) {
-      if (!useStatefulResponder || !this.shouldRetryStatefulResponder(error, session!)) {
+      const shouldRetry = useStatefulResponder && this.shouldRetryStatefulResponder(error, session!);
+      if (!shouldRetry) {
+        if (useStatefulResponder) {
+          this.resetStatefulResponder(session!);
+        }
         throw error;
       }
 
@@ -1681,7 +1685,12 @@ ${this.getStructuredResponseInstructions(this.browser !== null, projectCtx !== n
         strategy: runtimePlan.strategy,
         rationale: `${runtimePlan.rationale} Roscoe cleared a failed hidden responder thread and reseeded it from the current lane state.`,
       });
-      rawResult = await this.generateSuggestionStateful(reseedPrompt, sidecarProfile, session!, onPartial, onUsage);
+      try {
+        rawResult = await this.generateSuggestionStateful(reseedPrompt, sidecarProfile, session!, onPartial, onUsage);
+      } catch (reseedError) {
+        this.resetStatefulResponder(session!);
+        throw reseedError;
+      }
     }
 
     if (
