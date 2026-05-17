@@ -199,6 +199,46 @@ describe("buildTurnCommand", () => {
     }
   });
 
+  it("applies launcher env overrides and removes inherited env for custom profiles", () => {
+    const profile: HeadlessProfile = {
+      name: "claude-qwen",
+      command: "claude",
+      args: [],
+      protocol: "claude",
+      env: {
+        TEST_PROFILE_DEFAULT: "default-value",
+        TEST_PROFILE_OVERRIDE: "default-value",
+      },
+      envOverrides: {
+        TEST_PROFILE_OVERRIDE: "override-value",
+        TEST_PROFILE_HOME_PATH: "${HOME}/.claude-qwen",
+      },
+      unsetEnv: ["TEST_PROFILE_UNSET"],
+    };
+
+    const previousOverride = process.env.TEST_PROFILE_OVERRIDE;
+    const previousUnset = process.env.TEST_PROFILE_UNSET;
+    const previousHome = process.env.HOME;
+    process.env.TEST_PROFILE_OVERRIDE = "shell-value";
+    process.env.TEST_PROFILE_UNSET = "remove-me";
+    process.env.HOME = "/tmp/roscoe-home";
+
+    try {
+      const command = buildTurnCommand(profile, "hello");
+      expect(command.env.TEST_PROFILE_DEFAULT).toBe("default-value");
+      expect(command.env.TEST_PROFILE_OVERRIDE).toBe("override-value");
+      expect(command.env.TEST_PROFILE_HOME_PATH).toBe("/tmp/roscoe-home/.claude-qwen");
+      expect(command.env.TEST_PROFILE_UNSET).toBeUndefined();
+    } finally {
+      if (previousOverride === undefined) delete process.env.TEST_PROFILE_OVERRIDE;
+      else process.env.TEST_PROFILE_OVERRIDE = previousOverride;
+      if (previousUnset === undefined) delete process.env.TEST_PROFILE_UNSET;
+      else process.env.TEST_PROFILE_UNSET = previousUnset;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   it("builds Gemini turns with stream-json, yolo approval, sandbox in safe mode, and resume support", () => {
     const profile: HeadlessProfile = {
       name: "gemini",
@@ -406,6 +446,8 @@ describe("provider adapters", () => {
     expect(detectProtocol({ name: "qwen", command: "qwen" })).toBe("qwen");
     expect(detectProtocol({ name: "gemini", command: "gemini" })).toBe("gemini");
     expect(detectProtocol({ name: "kimi", command: "kimi" })).toBe("kimi");
+    expect(detectProtocol({ name: "claude-qwen", command: "claude" })).toBe("claude");
+    expect(detectProtocol({ name: "claude-qwen", command: "claude-qwen" })).toBe("claude");
     expect(getProviderAdapter("qwen").defaultProfileName).toBe("qwen");
     expect(getProviderAdapter("gemini").defaultProfileName).toBe("gemini");
     expect(getProviderAdapter("kimi").defaultProfileName).toBe("kimi");

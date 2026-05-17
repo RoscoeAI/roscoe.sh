@@ -45,6 +45,8 @@ export interface HeadlessProfile {
   protocol?: LLMProtocol;
   runtime?: RuntimeControlSettings;
   env?: NodeJS.ProcessEnv;
+  envOverrides?: Record<string, string>;
+  unsetEnv?: string[];
   // Set by OpenCodeServerManager.prepareProfile for openrouter lanes — the
   // URL of the warm `opencode serve` loopback server the worker should
   // attach to rather than spinning up its own. Absent for every other
@@ -118,12 +120,31 @@ export interface OneShotRunHandle {
   result: Promise<string>;
 }
 
+function expandProfileEnvValue(value: string, env: NodeJS.ProcessEnv): string {
+  const expanded = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, key: string) => env[key] ?? "");
+  const home = env.HOME;
+  if (!home) return expanded;
+  if (expanded === "~") return home;
+  return expanded.startsWith("~/") ? `${home}${expanded.slice(1)}` : expanded;
+}
+
+function buildProfileEnv(profile: HeadlessProfile): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...(profile.env ?? {}), ...process.env };
+  for (const [key, value] of Object.entries(profile.envOverrides ?? {})) {
+    env[key] = expandProfileEnvValue(value, env);
+  }
+  for (const key of profile.unsetEnv ?? []) {
+    delete env[key];
+  }
+  return env;
+}
+
 function buildCodexTurnCommand(
   profile: HeadlessProfile,
   prompt: string,
   sessionId?: string | null,
 ): SpawnSpec {
-  const env = { ...(profile.env ?? {}), ...process.env };
+  const env = buildProfileEnv(profile);
   const runtime = profile.runtime;
   const globalArgs: string[] = [];
   const execArgs = ["--json", "--skip-git-repo-check"];
@@ -184,7 +205,7 @@ function buildClaudeTurnCommand(
   prompt: string,
   sessionId?: string | null,
 ): SpawnSpec {
-  const env = { ...(profile.env ?? {}), ...process.env };
+  const env = buildProfileEnv(profile);
   const runtime = profile.runtime;
   delete env.CLAUDECODE;
 
@@ -221,7 +242,7 @@ function buildGeminiTurnCommand(
   prompt: string,
   sessionId?: string | null,
 ): SpawnSpec {
-  const env = { ...(profile.env ?? {}), ...process.env };
+  const env = buildProfileEnv(profile);
   const runtime = profile.runtime;
   const args = [
     ...(runtime?.model ? ["-m", runtime.model] : []),
@@ -248,7 +269,7 @@ function buildQwenTurnCommand(
   prompt: string,
   sessionId?: string | null,
 ): SpawnSpec {
-  const env = { ...(profile.env ?? {}), ...process.env };
+  const env = buildProfileEnv(profile);
   const runtime = profile.runtime;
   const args = [
     ...(shouldPassExplicitModel(runtime?.model) ? ["-m", runtime!.model!] : []),
@@ -275,7 +296,7 @@ function buildKimiTurnCommand(
   prompt: string,
   sessionId?: string | null,
 ): SpawnSpec {
-  const env = { ...(profile.env ?? {}), ...process.env };
+  const env = buildProfileEnv(profile);
   const runtime = profile.runtime;
   const args = [
     ...(shouldPassExplicitModel(runtime?.model) ? ["-m", runtime!.model!] : []),
@@ -788,7 +809,7 @@ function buildOpenRouterTurnCommand(
   prompt: string,
   sessionId?: string | null,
 ): SpawnSpec {
-  const env = { ...(profile.env ?? {}), ...process.env };
+  const env = buildProfileEnv(profile);
   const runtime = profile.runtime;
   if (runtime?.model) {
     upsertRoscoeOpenCodeOpenRouterModels([runtime.model]);
@@ -1194,6 +1215,7 @@ export function detectProtocol(profile: Pick<HeadlessProfile, "command" | "name"
 
   const hint = `${basename(profile.command)} ${profile.name}`.toLowerCase();
   if (hint.includes("openrouter") || hint.includes("opencode")) return "openrouter";
+  if (hint.includes("claude")) return "claude";
   if (hint.includes("codex")) return "codex";
   if (hint.includes("qwen")) return "qwen";
   if (hint.includes("kimi")) return "kimi";

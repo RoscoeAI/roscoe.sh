@@ -220,6 +220,29 @@ describe("runtime-defaults", () => {
     });
   });
 
+  it("keeps profile runtime defaults ahead of managed execution defaults", () => {
+    const qwenBackedClaude: HeadlessProfile = {
+      name: "claude-qwen",
+      command: "claude",
+      args: [],
+      protocol: "claude",
+      runtime: {
+        executionMode: "accelerated",
+        tuningMode: "manual",
+        model: "mlx-community/Qwen3.5-397B-A17B-4bit",
+        dangerouslySkipPermissions: true,
+      },
+    };
+
+    expect(getWorkerProfileForProject(qwenBackedClaude, null, null).runtime).toMatchObject({
+      executionMode: "accelerated",
+      tuningMode: "manual",
+      model: "mlx-community/Qwen3.5-397B-A17B-4bit",
+      dangerouslySkipPermissions: true,
+    });
+    expect(getWorkerProfileForProject(qwenBackedClaude, null, { model: "claude-opus-4-6" }).runtime?.model).toBe("claude-opus-4-6");
+  });
+
   it("defaults autonomous worker profiles to accelerated unless the project explicitly pins safe mode", () => {
     const workerBase: HeadlessProfile = {
       name: "codex",

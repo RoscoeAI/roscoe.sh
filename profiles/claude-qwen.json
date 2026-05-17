@@ -1,0 +1,23 @@
+{
+  "name": "claude-qwen",
+  "command": "claude",
+  "args": [],
+  "protocol": "claude",
+  "runtime": {
+    "executionMode": "accelerated",
+    "tuningMode": "manual",
+    "model": "mlx-community/Qwen3.5-397B-A17B-4bit",
+    "dangerouslySkipPermissions": true
+  },
+  "envOverrides": {
+    "CLAUDE_CONFIG_DIR": "${HOME}/.claude-qwen",
+    "ANTHROPIC_BASE_URL": "http://roscoe:52415",
+    "ANTHROPIC_API_KEY": "x",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "mlx-community/Qwen3.5-397B-A17B-4bit",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "mlx-community/Qwen3.5-397B-A17B-4bit",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mlx-community/Qwen3.5-397B-A17B-4bit",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "unsetEnv": ["CLAUDE_CODE_OAUTH_TOKEN"]
+}

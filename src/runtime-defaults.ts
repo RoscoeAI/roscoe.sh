@@ -223,7 +223,7 @@ export function getWorkerProfileForProject(
 
   return applyRuntimeSettings(
     baseProfile,
-    mergeRuntimeSettings(executionRuntime, projectDefault, overrides),
+    mergeRuntimeSettings(executionRuntime, baseProfile.runtime, projectDefault, overrides),
   );
 }
 

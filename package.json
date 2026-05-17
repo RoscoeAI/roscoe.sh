@@ -26,6 +26,7 @@
     "lint:fix": "npm run lint -- --fix",
     "start": "tsx src/index.ts",
     "dev": "tsx src/index.ts start claude-code",
+    "dev:qwen": "tsx src/index.ts start claude-qwen",
     "dev:sms-webhook-tunnel": "sh -c 'cloudflared tunnel --config \"${ROSCOE_CLOUDFLARED_CONFIG:-$HOME/.cloudflared/roscoe-sms-dev.yml}\" run \"${ROSCOE_CLOUDFLARED_TUNNEL:-roscoe-sms-dev}\"'",
     "profiles": "tsx src/index.ts profiles",
     "test": "vitest run",
